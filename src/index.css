@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+@theme {
+  --font-headline: "Space Grotesk", sans-serif;
+  --font-body: "Hanken Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --color-surface: #051424;
+  --color-surface-dim: #051424;
+  --color-surface-bright: #2c3a4c;
+  --color-surface-lowest: #010f1f;
+  --color-surface-low: #0d1c2d;
+  --color-surface-container: #122131;
+  --color-surface-high: #1c2b3c;
+  --color-surface-highest: #273647;
+  
+  --color-carbon-base: #0d1117;
+  --color-carbon-surface: #161b22;
+  --color-carbon-raised: #21262d;
+  --color-carbon-border: #30363d;
+  
+  --color-amber-lock: #f59e0b;
+  --color-amber-lock-dark: #d97706;
+  --color-green-ready: #10b981;
+  --color-green-ready-dark: #059669;
+  --color-crimson-sos: #ef4444;
+  --color-crimson-sos-dark: #dc2626;
+  
+  --color-telemetry-text: #d4e4fa;
+  --color-telemetry-muted: #94a3b8;
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: #051424;
+  color: #d4e4fa;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-headline {
+  font-family: var(--font-headline);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Mechanical Industrial tactile button pressed simulation */
+.industrial-btn {
+  transition: all 0.08s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+.industrial-btn:active {
+  transform: translateY(1px) scale(0.985);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.7);
+}
+
+/* Sub-pixel scanlines or instrument grid effect for automotive HUD glanceability */
+.hud-grid {
+  background-size: 24px 24px;
+  background-image: 
+    linear-gradient(to right, rgba(48, 54, 61, 0.18) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(48, 54, 61, 0.18) 1px, transparent 1px);
+}

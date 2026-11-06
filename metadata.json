@@ -1,0 +1,6 @@
+{
+  "name": "DriveLock Industrial Safety",
+  "description": "Mission-critical in-cab safety telemetry, ignition immobilizer, alcohol interlock, and emergency response interface for commercial fleets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
