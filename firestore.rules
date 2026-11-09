@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. User Profiles: Isolated to authenticated owner
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) 
+                    && isValidId(userId)
+                    && incoming().uid == request.auth.uid;
+      allow update: if isOwner(userId)
+                    && incoming().uid == existing().uid;
+      allow delete: if false;
+    }
+
+    // 2. Shift Sessions: Queryable and manageable by the shift operator
+    match /shifts/{shiftId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() 
+                    && isValidId(shiftId)
+                    && incoming().userId == request.auth.uid;
+      allow update: if isSignedIn() 
+                    && existing().userId == request.auth.uid
+                    && incoming().userId == existing().userId;
+      allow delete: if false;
+    }
+
+    // 3. Incident Logs: Safety audit trail
+    match /incidents/{incidentId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() 
+                    && isValidId(incidentId)
+                    && incoming().userId == request.auth.uid;
+      allow update: if false; // Incident events are immutable once logged
+      allow delete: if false;
+    }
+  }
+}

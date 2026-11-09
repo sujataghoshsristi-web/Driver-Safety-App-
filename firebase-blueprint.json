@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Commercial fleet driver profile and assigned vehicle unit.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "Driver Google email" },
+        "displayName": { "type": "string", "description": "Driver full name" },
+        "photoURL": { "type": "string", "description": "Driver avatar URL" },
+        "driverId": { "type": "string", "description": "Fleet driver identifier" },
+        "cabUnitId": { "type": "string", "description": "Assigned vehicle cab number" },
+        "role": { "type": "string", "enum": ["driver", "supervisor", "admin"], "description": "Access level" },
+        "createdAt": { "type": "string", "description": "Account registration timestamp" }
+      },
+      "required": ["uid", "email", "driverId", "role"]
+    },
+    "ShiftSession": {
+      "title": "ShiftSession",
+      "description": "In-cab operating shift session and telemetry summary.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Unique shift session ID" },
+        "userId": { "type": "string", "description": "Driver Firebase Auth UID" },
+        "cabUnitId": { "type": "string", "description": "Assigned vehicle unit" },
+        "driverId": { "type": "string", "description": "Fleet operator code" },
+        "startTime": { "type": "string", "description": "Shift start time" },
+        "endTime": { "type": "string", "description": "Shift completion time" },
+        "status": { "type": "string", "enum": ["active", "completed", "aborted"], "description": "Shift state" },
+        "totalKm": { "type": "number", "description": "Distance traveled in shift" },
+        "bacVerified": { "type": "number", "description": "Breathalyzer BAC result" },
+        "espDeviceType": { "type": "string", "description": "Microcontroller board (esp32/nodemcu)" }
+      },
+      "required": ["sessionId", "userId", "cabUnitId", "driverId", "status"]
+    },
+    "IncidentLog": {
+      "title": "IncidentLog",
+      "description": "Chronological safety, tamper, overspeed, and emergency events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Incident event ID" },
+        "userId": { "type": "string", "description": "Driver Firebase Auth UID" },
+        "cabUnitId": { "type": "string", "description": "Cab unit identifier" },
+        "timestamp": { "type": "string", "description": "Event timestamp" },
+        "title": { "type": "string", "description": "Short incident title" },
+        "severity": { "type": "string", "enum": ["info", "warning", "emergency"], "description": "Event severity" },
+        "code": { "type": "string", "description": "Standard industrial event code" },
+        "description": { "type": "string", "description": "Detailed incident text" },
+        "speedKmh": { "type": "number", "description": "Vehicle speed at event" },
+        "location": { "type": "string", "description": "GPS coordinates snapshot" }
+      },
+      "required": ["id", "userId", "severity", "code", "title"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private profile document for authenticated fleet operators."
+    },
+    "/shifts/{shiftId}": {
+      "schema": { "$ref": "#/entities/ShiftSession" },
+      "description": "Active and past in-cab shift records."
+    },
+    "/incidents/{incidentId}": {
+      "schema": { "$ref": "#/entities/IncidentLog" },
+      "description": "Permanent safety incident and tamper audit trail."
+    }
+  }
+}

@@ -20,6 +20,7 @@ interface PreShiftVerificationModalProps {
   telemetry: TelemetryData;
   onCompleteVerification: (driverPin: string, bac: number) => void;
   onToggleDock: () => void;
+  onOpenEspModal: () => void;
 }
 
 export const PreShiftVerificationModal: React.FC<PreShiftVerificationModalProps> = ({
@@ -28,6 +29,7 @@ export const PreShiftVerificationModal: React.FC<PreShiftVerificationModalProps>
   telemetry,
   onCompleteVerification,
   onToggleDock,
+  onOpenEspModal,
 }) => {
   const [activeStep, setActiveStep] = useState<1 | 2 | 3 | 4>(1);
   const [pin, setPin] = useState<string>('');
@@ -190,7 +192,34 @@ export const PreShiftVerificationModal: React.FC<PreShiftVerificationModalProps>
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-[#30363d] flex items-center justify-between">
+                <div className="mt-4 pt-3 border-t border-[#30363d] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-[#94a3b8]">ESP TELEMETRY LINK:</span>
+                    <span
+                      className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${
+                        telemetry.esp.isConnected
+                          ? 'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]'
+                          : 'bg-[#f59e0b]/20 text-[#f59e0b] border border-[#f59e0b]'
+                      }`}
+                    >
+                      {telemetry.esp.isConnected
+                        ? `${telemetry.esp.deviceType.toUpperCase()} ONLINE`
+                        : 'NOT CONNECTED'}
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      cabAudio.playKeyClick();
+                      onOpenEspModal();
+                    }}
+                    className="text-xs font-mono px-3 py-1 rounded bg-[#1c2b3c] hover:bg-[#273647] text-[#ffc174] border border-[#f59e0b]/50"
+                  >
+                    {telemetry.esp.isConnected ? 'Configure ESP Settings' : 'Connect ESP32 / NodeMCU'}
+                  </button>
+                </div>
+
+                <div className="mt-3 pt-3 border-t border-[#30363d] flex items-center justify-between">
                   <span className="text-xs font-mono text-[#94a3b8]">DOCK SENSOR STATUS:</span>
                   <span
                     className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${
