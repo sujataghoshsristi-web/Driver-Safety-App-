@@ -1,9 +1,9 @@
 /**
- * Configurable Instant Emergency Call Engine (Default: 82199)
+ * Configurable Emergency Call Engine (Default: 82199)
  * Supports:
- * 1. Configurable emergency number saved to localStorage (default: 82199)
- * 2. Direct Android APK Intent.ACTION_CALL bridge (window.Android.callNow) when running in native WebView with CALL_PHONE permission
- * 3. Instant 0ms in-app speakerphone + live two-way microphone + ESP32 SIM800L hardware call trigger (NO external tel: dialer popup or SIM card prompt!)
+ * 1. Configurable emergency number saved to localStorage
+ * 2. Direct <a href="tel:82199">Call Now</a> & Android Intent.ACTION_CALL bridge
+ * 3. Instant 0ms in-app speakerphone + ESP32 SIM800L hardware call trigger
  */
 
 import { espManager } from './espManager';
@@ -112,57 +112,73 @@ class EmergencyCallManager {
   }
 
   /**
-   * Executes direct Android APK Intent.ACTION_CALL bridge ONLY if present (with CALL_PHONE permission).
-   * Does NOT redirect to external browser `tel:` dialer so the user is never forced to pick a SIM card or tap dial.
+   * Executes <a href="tel:82199">Call Now</a> and Android Intent.ACTION_CALL bridge
    */
-  public triggerNativeAndroidBridgeIfAvailable(targetNumber?: string): boolean {
+  public triggerNativeTelCall(targetNumber?: string) {
     const cleanNum = (targetNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER).replace(
       /[^0-9+*#]/g,
       ''
     );
 
-    if (typeof window === 'undefined') return false;
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
 
-    // Only call native Android JavascriptInterface if running inside an APK with Intent.ACTION_CALL
+    // 1. If running inside an Android WebView with CALL_PHONE JavascriptInterface:
+    // startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + cleanNum)));
     try {
       const win = window as any;
       if (win.Android && typeof win.Android.callNow === 'function') {
         win.Android.callNow(cleanNum);
-        return true;
+        return;
       }
       if (win.Android && typeof win.Android.callPhone === 'function') {
         win.Android.callPhone(cleanNum);
-        return true;
+        return;
       }
     } catch (e) {}
 
-    return false;
+    // 2. Standard <a href="tel:82199">Call Now</a> programmatic invocation
+    try {
+      const callLink = document.createElement('a');
+      callLink.href = `tel:${cleanNum}`;
+      callLink.textContent = 'Call Now';
+      callLink.style.display = 'none';
+      document.body.appendChild(callLink);
+      callLink.click();
+      document.body.removeChild(callLink);
+    } catch (err) {
+      window.location.href = `tel:${cleanNum}`;
+    }
   }
 
   /**
-   * Instantly connects a 0ms direct emergency call to the configured number (default 82199)
-   * with zero touch needed, zero SIM selector popup, live speakerphone dispatch audio,
-   * live hands-free microphone stream, and ESP32 SIM800L hardware call trigger.
+   * Instantly places a direct call to the configured emergency number (default 82199)
+   * using <a href="tel:82199">Call Now</a> / Intent.ACTION_CALL + 0ms speakerphone telemetry.
    */
   public startInstantCall(
     phoneNumber?: string,
     context?: EmergencyCallContext
   ) {
-    const activeNum = (phoneNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER)
-      .replace(/[^0-9+*#]/g, '')
-      .trim() || DEFAULT_EMERGENCY_PHONE_NUMBER;
-
+    const activeNum = phoneNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
     this.lastContext = context;
 
-    // 1. Notify ESP32/SIM800L GSM hardware over Serial/BLE if connected
+    // 1. Notify ESP32/SIM800L hardware over Serial/BLE if connected
     try {
       espManager.sendCommand(`CALL:${activeNum}`);
     } catch (e) {}
 
-    // 2. If running inside a native Android APK with Intent.ACTION_CALL bridge, trigger it directly
-    this.triggerNativeAndroidBridgeIfAvailable(activeNum);
+    // 2. Trigger <a href="tel:82199">Call Now</a> / Android Intent.ACTION_CALL immediately
+    this.triggerNativeTelCall(activeNum);
 
-    // 3. Connect in-app speakerphone call at 0ms (no dialer redirect, no SIM card prompt)
+    // If already connected in-app, just update context
+    if (this.state.status === 'connected') {
+      return;
+    }
+
+    this.cleanupTimers();
+    this.driverRespondedOnce = false;
+    this.speakingFrames = 0;
+
+    // INSTANT CONNECTION (0ms — no ringing or dialing wait)
     const unit = context?.unitNumber || 'AUTO-101';
     const impact = context?.impactG ? `${context.impactG.toFixed(1)}G` : 'high-G';
     const lat = context?.latitude ? context.latitude.toFixed(4) : '37.7749';
@@ -170,22 +186,10 @@ class EmergencyCallManager {
 
     const dispatchGreeting =
       context?.reason === 'SOS'
-        ? `Emergency Dispatch ${activeNum} connected instantly on speakerphone. SOS alert received from unit ${unit} at GPS ${lat}, ${lon}. Rescue units are en route. Driver, your mic is live, go ahead.`
+        ? `Emergency Dispatch ${activeNum} connected on speakerphone. SOS alert received from unit ${unit} at GPS ${lat}, ${lon}. Rescue units are en route. Driver, your mic is live, go ahead.`
         : context?.reason === 'DIRECT'
-        ? `Emergency Dispatch ${activeNum} connected instantly on speakerphone for unit ${unit} at GPS ${lat}, ${lon}. Priority operator is on the line, go ahead driver.`
+        ? `Emergency Dispatch ${activeNum} connected on speakerphone for unit ${unit} at GPS ${lat}, ${lon}. Operator is on the line, go ahead driver.`
         : `Emergency Dispatch ${activeNum} connected instantly on speakerphone. Automatic ${impact} crash detected on unit ${unit} at GPS ${lat}, ${lon}. Ambulance and rescue units dispatched immediately. Driver, your microphone is live—can you hear me?`;
-
-    // If already connected, re-announce immediately with updated context
-    if (this.state.status === 'connected') {
-      this.state.phoneNumber = activeNum;
-      this.playPickupClick();
-      this.speakDispatchMessage(dispatchGreeting);
-      return;
-    }
-
-    this.cleanupTimers();
-    this.driverRespondedOnce = false;
-    this.speakingFrames = 0;
 
     this.state = {
       status: 'connected',
@@ -195,14 +199,14 @@ class EmergencyCallManager {
       micMuted: false,
       isMuted: false,
       speakerphoneOn: true,
-      micLevel: 38,
+      micLevel: 35,
       dispatcherSpeaking: true,
       lastTranscript: `DISPATCH (${activeNum}): "${dispatchGreeting}"`,
       dispatchTranscript: dispatchGreeting,
     };
     this.emit();
 
-    // Play instant trunk-connected dual-tone + carrier click
+    // Play instant trunk-connected tone
     this.playPickupClick();
 
     // Open hands-free speakerphone microphone stream immediately
@@ -228,11 +232,8 @@ class EmergencyCallManager {
     const dispatchGreeting =
       ctx?.reason === 'SOS'
         ? `Emergency Dispatch ${this.state.phoneNumber} connected on speakerphone. SOS alert received from unit ${unit} at GPS ${lat}, ${lon}. Rescue units are en route. Driver, your mic is live, go ahead.`
-        : ctx?.reason === 'DIRECT'
-        ? `Emergency Dispatch ${this.state.phoneNumber} connected on speakerphone for unit ${unit} at GPS ${lat}, ${lon}. Operator is on the line, go ahead driver.`
         : `Emergency Dispatch ${this.state.phoneNumber} connected on speakerphone. Automatic ${impact} crash detected on unit ${unit} at GPS ${lat}, ${lon}. Ambulance and rescue units dispatched immediately. Driver, your microphone is live—can you hear me?`;
 
-    this.playPickupClick();
     this.speakDispatchMessage(dispatchGreeting);
   }
 
@@ -242,21 +243,13 @@ class EmergencyCallManager {
     this.state.dispatcherSpeaking = true;
     this.emit();
 
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    if (typeof window !== 'undefined' && Boolean(window.speechSynthesis)) {
       try {
         window.speechSynthesis.cancel();
-        window.speechSynthesis.resume();
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1.04;
-        utterance.pitch = 0.96;
+        utterance.rate = 1.03;
+        utterance.pitch = 0.95;
         utterance.volume = 1.0;
-
-        const voices = window.speechSynthesis.getVoices();
-        if (voices && voices.length > 0) {
-          const preferred = voices.find((v) => v.lang.startsWith('en') && v.localService) || voices.find((v) => v.lang.startsWith('en'));
-          if (preferred) utterance.voice = preferred;
-        }
-
         utterance.onend = () => {
           this.state.dispatcherSpeaking = false;
           this.emit();
@@ -325,14 +318,14 @@ class EmergencyCallManager {
           this.state.status === 'connected' &&
           !this.state.dispatcherSpeaking &&
           !this.driverRespondedOnce &&
-          this.state.durationSeconds >= 4
+          this.state.durationSeconds >= 5
         ) {
-          if (level > 30) {
+          if (level > 32) {
             this.speakingFrames += 1;
-            if (this.speakingFrames >= 4) {
+            if (this.speakingFrames >= 5) {
               this.driverRespondedOnce = true;
               this.speakDispatchMessage(
-                `Copy that driver, we hear you loud and clear on ${this.state.phoneNumber}. Stay safe in the cab, medical and fire teams are 3 minutes away from your GPS pin.`
+                `Copy that driver, we hear you loud and clear on ${this.state.phoneNumber}. Stay still in the cab, medical and fire teams are 3 minutes away from your GPS pin.`
               );
             }
           } else {
@@ -349,6 +342,39 @@ class EmergencyCallManager {
     }
   }
 
+  private playRingbackTone() {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!this.audioCtx || this.audioCtx.state === 'closed') {
+        this.audioCtx = new AudioContextClass();
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+
+      const osc1 = this.audioCtx.createOscillator();
+      const osc2 = this.audioCtx.createOscillator();
+      const gain = this.audioCtx.createGain();
+
+      osc1.type = 'sine';
+      osc2.type = 'sine';
+      osc1.frequency.setValueAtTime(440, this.audioCtx.currentTime);
+      osc2.frequency.setValueAtTime(480, this.audioCtx.currentTime);
+
+      gain.gain.setValueAtTime(0.18, this.audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, this.audioCtx.currentTime + 0.85);
+
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(this.audioCtx.destination);
+
+      osc1.start();
+      osc2.start();
+      osc1.stop(this.audioCtx.currentTime + 0.9);
+      osc2.stop(this.audioCtx.currentTime + 0.9);
+    } catch (e) {}
+  }
+
   private playPickupClick() {
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -359,24 +385,20 @@ class EmergencyCallManager {
         this.audioCtx.resume();
       }
 
-      const now = this.audioCtx.currentTime;
-
-      // Tone 1: Instant trunk latch beep (880Hz -> 1320Hz)
       const osc = this.audioCtx.createOscillator();
       const gain = this.audioCtx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(880, now);
-      osc.frequency.setValueAtTime(1320, now + 0.08);
-      osc.frequency.setValueAtTime(1760, now + 0.16);
+      osc.frequency.setValueAtTime(880, this.audioCtx.currentTime);
+      osc.frequency.setValueAtTime(1320, this.audioCtx.currentTime + 0.06);
 
-      gain.gain.setValueAtTime(0.28, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      gain.gain.setValueAtTime(0.22, this.audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.14);
 
       osc.connect(gain);
       gain.connect(this.audioCtx.destination);
 
-      osc.start(now);
-      osc.stop(now + 0.29);
+      osc.start();
+      osc.stop(this.audioCtx.currentTime + 0.15);
     } catch (e) {}
   }
 
@@ -393,7 +415,7 @@ class EmergencyCallManager {
 
   public endCall() {
     this.cleanupTimers();
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    if (typeof window !== 'undefined' && Boolean(window.speechSynthesis)) {
       try {
         window.speechSynthesis.cancel();
       } catch (e) {}

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AlertOctagon, PhoneCall, XCircle, BellRing, Settings, Check, X, Volume2, Mic, MicOff } from 'lucide-react';
+import { AlertOctagon, PhoneCall, XCircle, BellRing, Settings, Check, X } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
 import {
@@ -28,7 +28,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
   const holdIntervalRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
 
-  const HOLD_DURATION_MS = 1200; // 1.2s hold or tap Call Now for instant 0ms connection
+  const HOLD_DURATION_MS = 1500; // 1.5 seconds hold-to-activate
 
   useEffect(() => {
     const unsub = emergencyCallManager.subscribe((state) => {
@@ -39,17 +39,6 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
   }, []);
 
   const activePhone = callState.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
-
-  const triggerInstantSosCall = () => {
-    cabAudio.playEmergencyAlarm();
-    callEmergencyNumber(activePhone, {
-      unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
-      latitude: telemetry.gps.latitude,
-      longitude: telemetry.gps.longitude,
-      reason: 'SOS',
-    });
-    onTriggerSos();
-  };
 
   const startHold = () => {
     if (telemetry.sosActive) return;
@@ -68,7 +57,14 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
         if (holdIntervalRef.current) clearInterval(holdIntervalRef.current);
         setIsHolding(false);
         setHoldProgress(0);
-        triggerInstantSosCall();
+        cabAudio.playEmergencyAlarm();
+        callEmergencyNumber(activePhone, {
+          unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
+          latitude: telemetry.gps.latitude,
+          longitude: telemetry.gps.longitude,
+          reason: 'SOS',
+        });
+        onTriggerSos();
       }
     }, 30);
   };
@@ -140,57 +136,43 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
         </form>
       )}
 
-      {telemetry.sosActive || callState.status === 'connected' ? (
-        /* Instant Connected Emergency Call Banner */
+      {telemetry.sosActive ? (
+        /* Emergency Active Banner & Direct <a href="tel:82199">Call Now</a> */
         <div className="p-3.5 sm:p-4 rounded-xl bg-[#93000a] border-2 sm:border-4 border-white text-white shadow-2xl">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
             <div className="flex items-center gap-3">
-              <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-lg bg-[#10b981] text-black flex items-center justify-center font-bold shrink-0">
-                <BellRing className="w-6 h-6 sm:w-7 sm:h-7 animate-bounce" />
+              <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-lg bg-white text-[#93000a] flex items-center justify-center font-bold shrink-0">
+                <BellRing className="w-6 h-6 sm:w-7 sm:h-7 animate-spin" />
               </div>
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono text-xs font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase">
-                    CONNECTED TO {activePhone} · {formatDuration(callState.durationSeconds)}
+                    CALLING {activePhone} · {formatDuration(callState.durationSeconds)}
                   </span>
                   <span className="font-mono text-xs text-white">
                     GPS: {telemetry.gps.latitude.toFixed(4)}, {telemetry.gps.longitude.toFixed(4)}
                   </span>
                 </div>
                 <h3 className="font-headline font-bold text-lg sm:text-2xl mt-0.5">
-                  LIVE SPEAKERPHONE CALL ACTIVE ({activePhone})
+                  EMERGENCY CALL ACTIVE ({activePhone})
                 </h3>
                 <p className="text-xs font-body text-white/90 line-clamp-2">
                   {callState.dispatchTranscript ||
-                    `Connected instantly to ${activePhone} on hands-free speakerphone.`}
+                    'Emergency call initiated via Intent.ACTION_CALL / tel:'}
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2.5 w-full sm:w-auto flex-wrap">
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.toggleMute();
-                }}
-                className="flex-1 sm:flex-none h-12 px-4 rounded-lg bg-black/50 hover:bg-black/70 text-white border border-white/40 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+              {/* Exact <a href="tel:82199">Call Now</a> link requested by user */}
+              <a
+                href={`tel:${activePhone}`}
+                onClick={() => cabAudio.playKeyClick()}
+                className="flex-1 sm:flex-none h-12 sm:h-14 px-5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 whitespace-nowrap shadow-xl transition-transform active:scale-95 cursor-pointer"
               >
-                {callState.isMuted ? <MicOff className="w-4 h-4 text-[#ff938c]" /> : <Mic className="w-4 h-4 text-[#10b981]" />}
-                <span>{callState.isMuted ? 'UNMUTE MIC' : 'MIC LIVE'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.reannounceDispatch();
-                }}
-                className="flex-1 sm:flex-none h-12 px-4 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shadow-xl cursor-pointer"
-              >
-                <Volume2 className="w-4 h-4 text-black" />
-                <span>REPEAT VOICE ({activePhone})</span>
-              </button>
+                <PhoneCall className="w-5 h-5 fill-black text-black" />
+                <span>Call Now ({activePhone})</span>
+              </a>
 
               <button
                 type="button"
@@ -199,16 +181,16 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                   emergencyCallManager.endCall();
                   onCancelSos();
                 }}
-                className="flex-1 sm:flex-none h-12 px-4 rounded-lg bg-white text-[#93000a] hover:bg-slate-100 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shadow-lg cursor-pointer"
+                className="flex-1 sm:flex-none h-12 sm:h-14 px-4 rounded-lg bg-white text-[#93000a] hover:bg-slate-100 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-2 whitespace-nowrap shadow-lg cursor-pointer"
               >
                 <XCircle className="w-4 h-4 sm:w-5 sm:h-5 text-[#93000a]" />
-                <span>END CALL</span>
+                <span>CANCEL SOS</span>
               </button>
             </div>
           </div>
         </div>
       ) : (
-        /* Full-Width SOS Button + Instant 0ms Call Now + Configure Number */
+        /* Distinctive Full-Width SOS Button + Direct Call Now + Configure Number */
         <div className="flex flex-col sm:flex-row items-stretch gap-2 w-full">
           <button
             onMouseDown={startHold}
@@ -218,7 +200,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
             onTouchEnd={cancelHold}
             onTouchCancel={cancelHold}
             className="relative flex-1 min-h-[64px] sm:min-h-[72px] rounded-xl bg-[#ef4444] hover:bg-[#dc2626] active:bg-[#b91c1c] text-white border-2 border-white font-headline font-bold text-base sm:text-xl tracking-wider uppercase transition-transform flex items-center justify-between px-4 sm:px-6 shadow-[0_4px_24px_rgba(239,68,68,0.4)] overflow-hidden select-none cursor-pointer"
-            aria-label="Emergency SOS button"
+            aria-label="Emergency SOS button (Hold for 1.5 seconds to trigger)"
           >
             <div
               className="absolute left-0 top-0 bottom-0 bg-[#b91c1c] opacity-80 pointer-events-none transition-all duration-75"
@@ -233,23 +215,26 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                 </span>
                 <span className="block text-[10px] sm:text-[11px] font-mono tracking-normal text-white/90 uppercase mt-0.5 font-normal">
                   {isHolding
-                    ? `CONNECTING INSTANTLY: ${Math.round(holdProgress)}%`
-                    : `HOLD 1.2s OR TAP 'CALL NOW' FOR 0ms INSTANT CALL`}
+                    ? `HOLD FIRM: ${Math.round(holdProgress)}%`
+                    : `HOLD 1.5s OR TAP 'CALL NOW' TO DIAL ${activePhone}`}
                 </span>
               </div>
             </div>
           </button>
 
-          {/* Instant 0ms Call Now & Configure Number buttons */}
+          {/* Direct <a href="tel:82199">Call Now</a> & Configure Number buttons */}
           <div className="flex items-stretch gap-2">
-            <button
-              type="button"
-              onClick={triggerInstantSosCall}
-              className="flex-1 sm:flex-none min-h-[52px] px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] active:scale-95 text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer whitespace-nowrap"
+            <a
+              href={`tel:${activePhone}`}
+              onClick={() => {
+                cabAudio.playKeyClick();
+                emergencyCallManager.triggerNativeTelCall(activePhone);
+              }}
+              className="flex-1 sm:flex-none min-h-[52px] px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer whitespace-nowrap"
             >
               <PhoneCall className="w-4 h-4 fill-black text-black shrink-0" />
               <span>Call Now ({activePhone})</span>
-            </button>
+            </a>
 
             <button
               type="button"

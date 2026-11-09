@@ -148,28 +148,10 @@ const INITIAL_EVENTS: IncidentEvent[] = [
   },
 ];
 
-const INCIDENT_STORAGE_KEY = 'drivelock_incident_events_v2';
-
-const loadInitialEvents = (): IncidentEvent[] => {
-  if (typeof window !== 'undefined') {
-    try {
-      const raw = window.localStorage.getItem(INCIDENT_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {}
-  }
-  return INITIAL_EVENTS;
-};
-
 export default function App() {
   const { currentUser, userProfile, isAuthReady, logout } = useAuth();
   const [telemetry, setTelemetry] = useState<TelemetryData>(INITIAL_TELEMETRY);
-  const [events, setEvents] = useState<IncidentEvent[]>(loadInitialEvents);
-  const [latestIncidentToast, setLatestIncidentToast] = useState<IncidentEvent | null>(null);
+  const [events, setEvents] = useState<IncidentEvent[]>(INITIAL_EVENTS);
   const [activeTab, setActiveTab] = useState<'cockpit' | 'phoneSensors' | 'esp' | 'diagnostics' | 'logs' | 'simulator'>('cockpit');
   const [viewLayout, setViewLayout] = useState<'phone' | 'tablet' | 'full'>('full');
   const [isPreShiftOpen, setIsPreShiftOpen] = useState<boolean>(false);
@@ -184,85 +166,6 @@ export default function App() {
   const [isCruiseActive, setIsCruiseActive] = useState<boolean>(false);
   const [activeDtc, setActiveDtc] = useState<{ code: string; desc: string } | null>(null);
 
-  // Refs to prevent stale closures in hardware sensor listeners
-  const telemetryRef = useRef<TelemetryData>(telemetry);
-  const currentUserRef = useRef(currentUser);
-  const lastOverspeedLogTimeRef = useRef<number>(0);
-  const lastOverspeedPeakRef = useRef<number>(0);
-  const lastHarshGLogTimeRef = useRef<number>(0);
-  const lastNoiseLogTimeRef = useRef<number>(0);
-  const toastTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    telemetryRef.current = telemetry;
-  }, [telemetry]);
-
-  useEffect(() => {
-    currentUserRef.current = currentUser;
-  }, [currentUser]);
-
-  // Reliable Incident Logger (never suffers from stale closure or nested state drop)
-  const logEvent = (
-    title: string,
-    severity: 'info' | 'warning' | 'emergency',
-    code: string,
-    description: string,
-    overrideSnapshot?: { speedKmh?: number; location?: string }
-  ) => {
-    const liveSensorSpeed = phoneSensors.getState().gps.speedKmh;
-    const currentT = telemetryRef.current;
-    const recordedSpeed =
-      overrideSnapshot?.speedKmh !== undefined
-        ? overrideSnapshot.speedKmh
-        : Math.max(liveSensorSpeed, currentT.speedKmh);
-    const recordedLocation =
-      overrideSnapshot?.location ||
-      `LAT ${currentT.gps.latitude.toFixed(4)}, LON ${currentT.gps.longitude.toFixed(4)}`;
-
-    const newEvt: IncidentEvent = {
-      id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      timestamp: new Date().toLocaleTimeString(),
-      title,
-      severity,
-      code,
-      description,
-      telemetrySnapshot: {
-        speedKmh: recordedSpeed,
-        location: recordedLocation,
-      },
-    };
-
-    setEvents((prev) => {
-      const updated = [newEvt, ...prev].slice(0, 120);
-      if (typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem(INCIDENT_STORAGE_KEY, JSON.stringify(updated));
-        } catch (e) {}
-      }
-      return updated;
-    });
-
-    if (severity === 'warning' || severity === 'emergency') {
-      setLatestIncidentToast(newEvt);
-      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-      toastTimerRef.current = window.setTimeout(() => {
-        setLatestIncidentToast(null);
-      }, 6000);
-    }
-
-    // Persist to Firestore if user is authenticated
-    const activeUser = currentUserRef.current;
-    if (activeUser) {
-      addDoc(collection(db, 'incidents'), {
-        ...newEvt,
-        userId: activeUser.uid,
-        cabUnitId: currentT.selectedVehicle?.unitNumber || currentT.cabUnitId,
-      }).catch((err) => {
-        console.warn('Incident Firestore sync:', err);
-      });
-    }
-  };
-
   // Sync authenticated driver info into vehicle telemetry
   useEffect(() => {
     if (userProfile) {
@@ -274,126 +177,31 @@ export default function App() {
     }
   }, [userProfile]);
 
-  // Subscribe to 60FPS velocity & G-force stream for instant High-Speed and Harsh Impact incident recording
-  useEffect(() => {
-    const unsubFast = phoneSensors.subscribeSpeed((fastData) => {
-      const currentT = telemetryRef.current;
-      const limit = currentT.speedLimitKmh || 45;
-      const speed = fastData.speedKmh;
-      const now = Date.now();
-
-      // 1. REAL-TIME HIGH-SPEED / OVER-SPEED INCIDENT RECORDING
-      if (speed > limit) {
-        const timeSinceLast = now - lastOverspeedLogTimeRef.current;
-        const spikedHigher = speed >= lastOverspeedPeakRef.current + 10;
-
-        if (timeSinceLast > 7000 || spikedHigher) {
-          lastOverspeedLogTimeRef.current = now;
-          lastOverspeedPeakRef.current = Math.max(lastOverspeedPeakRef.current, speed);
-
-          cabAudio.playWarningBuzzer();
-          if ('vibrate' in navigator) navigator.vibrate([180, 90, 180]);
-
-          const vehicleLabel = currentT.selectedVehicle?.name || currentT.cabUnitId;
-          logEvent(
-            `High-Speed Governor Violation (${speed} km/h)`,
-            'warning',
-            'SPD-GOV-OVR',
-            `${vehicleLabel} reached ${speed} km/h — exceeding the ${limit} km/h commercial speed governor limit.`,
-            {
-              speedKmh: speed,
-              location: `LAT ${currentT.gps.latitude.toFixed(4)}, LON ${currentT.gps.longitude.toFixed(4)}`,
-            }
-          );
-
-          setTelemetry((prev) => ({
-            ...prev,
-            speedKmh: speed,
-            rpm: fastData.rpm,
-            safetyStatus:
-              prev.safetyStatus === 'EMERGENCY_CRITICAL' || prev.safetyStatus === 'GAS_HAZARD_LOCKOUT'
-                ? prev.safetyStatus
-                : 'RESTRICTED_GOVERNOR',
-          }));
-        }
-      } else {
-        lastOverspeedPeakRef.current = 0;
-      }
-
-      // 2. REAL-TIME HARSH G-FORCE / BRAKING / POTHOLE SHOCK RECORDING (1.45G to 2.99G)
-      const totalG = Math.sqrt(fastData.gx ** 2 + fastData.gy ** 2 + fastData.gz ** 2);
-      if (totalG >= 1.45 && totalG < 3.0 && now - lastHarshGLogTimeRef.current > 5500) {
-        lastHarshGLogTimeRef.current = now;
-        cabAudio.playWarningBuzzer();
-        logEvent(
-          `Harsh G-Force / Road Shock (${totalG.toFixed(2)}G)`,
-          'warning',
-          'HARSH-G-FORCE',
-          `Physical accelerometer registered ${totalG.toFixed(2)}G harsh braking / road impact vector at ${speed} km/h.`,
-          {
-            speedKmh: speed,
-            location: `LAT ${currentT.gps.latitude.toFixed(4)}, LON ${currentT.gps.longitude.toFixed(4)}`,
-          }
-        );
-      }
-    });
-
-    return () => unsubFast();
-  }, []);
-
   // Subscribe to live Phone Hardware Sensors (Accelerometer, Gyro, Compass, GPS, Mic dB, Battery)
   useEffect(() => {
     const unsubSensors = phoneSensors.subscribe((sensorState) => {
-      // Check for high cabin noise spike (>= 85 dB)
-      if (
-        sensorState.sound.active &&
-        sensorState.sound.decibelsDb >= 85 &&
-        Date.now() - lastNoiseLogTimeRef.current > 10000
-      ) {
-        lastNoiseLogTimeRef.current = Date.now();
-        logEvent(
-          `High Cabin Acoustic Alert (${sensorState.sound.decibelsDb} dB)`,
-          'warning',
-          'CAB-NOISE-HIGH',
-          `Cabin microphone registered ${sensorState.sound.decibelsDb} dB acoustic spike exceeding 85 dB threshold.`
-        );
-      }
-
       setTelemetry((prev) => {
-        const updatedGForce = sensorState.isActive
-          ? {
-              x: sensorState.accel.gx,
-              y: sensorState.accel.gy,
-              z: sensorState.accel.gz,
-              peak: Math.max(prev.gForce.peak, sensorState.accel.peakG),
-            }
-          : prev.gForce;
+        // If phone sensors active, synchronize physical G-force
+        const updatedGForce = sensorState.isActive ? {
+          x: sensorState.accel.gx,
+          y: sensorState.accel.gy,
+          z: sensorState.accel.gz,
+          peak: sensorState.accel.peakG,
+        } : prev.gForce;
 
-        const updatedSpeed = isRealGpsSpeed
+        // When in Real GPS Speed mode:
+        // Reads direct GPS speed (0 if stationary, actual speed when moving in vehicle)
+        const updatedSpeed = isRealGpsSpeed && sensorState.gps.active
           ? sensorState.gps.speedKmh
           : prev.speedKmh;
 
-        const updatedRpm =
-          updatedSpeed > 0
-            ? Math.round(850 + updatedSpeed * 30)
-            : prev.dockLocked && prev.interlock.status === 'passed'
-            ? 850
-            : 0;
+        const updatedRpm = updatedSpeed > 0
+          ? Math.round(850 + updatedSpeed * 30)
+          : (prev.dockLocked && prev.interlock.status === 'passed' ? 850 : 0);
 
-        const updatedThrottle =
-          updatedSpeed > 0
-            ? Math.min(100, Math.round((updatedSpeed / (prev.speedLimitKmh || 60)) * 70))
-            : 0;
-
-        const isOver = updatedSpeed > prev.speedLimitKmh;
-        let nextSafety = prev.safetyStatus;
-        if (
-          prev.safetyStatus !== 'EMERGENCY_CRITICAL' &&
-          prev.safetyStatus !== 'GAS_HAZARD_LOCKOUT' &&
-          prev.safetyStatus !== 'IMMOBILIZED'
-        ) {
-          nextSafety = isOver ? 'RESTRICTED_GOVERNOR' : 'OPERATIONAL_READY';
-        }
+        const updatedThrottle = updatedSpeed > 0
+          ? Math.min(100, Math.round((updatedSpeed / (prev.speedLimitKmh || 60)) * 70))
+          : 0;
 
         return {
           ...prev,
@@ -402,7 +210,6 @@ export default function App() {
           speedKmh: updatedSpeed,
           rpm: updatedRpm,
           throttlePercent: updatedThrottle,
-          safetyStatus: nextSafety,
           dockVoltage: sensorState.battery.isCharging ? 5.0 : prev.dockVoltage,
           gps: {
             ...prev.gps,
@@ -418,46 +225,38 @@ export default function App() {
     return () => unsubSensors();
   }, [isRealGpsSpeed]);
 
-  // Handle Crash Detection and immediate 0ms call to configured emergency number
+  // Handle Crash Detection and immediate call to configured emergency number
   const handleCrashDetected = (impactG: number) => {
     const activeNum = emergencyCallManager.getPhoneNumber();
-    const currentT = telemetryRef.current;
-    const crashSpeed = Math.max(phoneSensors.getState().gps.speedKmh, currentT.speedKmh);
-
     cabAudio.playEmergencyAlarm();
     setCrashImpactG(impactG);
     setIsCrashModalOpen(true);
-
-    callEmergencyNumber(activeNum, {
-      unitNumber: currentT.selectedVehicle?.unitNumber || currentT.cabUnitId,
-      impactG,
-      latitude: currentT.gps.latitude,
-      longitude: currentT.gps.longitude,
-      reason: 'CRASH',
+    setTelemetry((prev) => {
+      callEmergencyNumber(activeNum, {
+        unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
+        impactG,
+        latitude: prev.gps.latitude,
+        longitude: prev.gps.longitude,
+        reason: 'CRASH',
+      });
+      logEvent(
+        `PHYSICAL COLLISION DETECTED — CALLING ${activeNum}`,
+        'emergency',
+        'CRASH-SHOCK',
+        `Physical accelerometer registered ${impactG.toFixed(2)}G impact. Emergency call to ${activeNum} placed.`
+      );
+      return {
+        ...prev,
+        gForce: {
+          ...prev.gForce,
+          peak: impactG,
+        },
+        sosActive: true,
+        safetyStatus: 'EMERGENCY_CRITICAL',
+        speedKmh: 0,
+        ignitionRelayClosed: false,
+      };
     });
-
-    logEvent(
-      `PHYSICAL COLLISION DETECTED (${impactG.toFixed(2)}G) — CALLING ${activeNum}`,
-      'emergency',
-      'CRASH-SHOCK',
-      `Physical accelerometer registered ${impactG.toFixed(2)}G collision impact. Instant speakerphone emergency call connected to ${activeNum}.`,
-      {
-        speedKmh: crashSpeed,
-        location: `LAT ${currentT.gps.latitude.toFixed(4)}, LON ${currentT.gps.longitude.toFixed(4)}`,
-      }
-    );
-
-    setTelemetry((prev) => ({
-      ...prev,
-      gForce: {
-        ...prev.gForce,
-        peak: Math.max(prev.gForce.peak, impactG),
-      },
-      sosActive: true,
-      safetyStatus: 'EMERGENCY_CRITICAL',
-      speedKmh: 0,
-      ignitionRelayClosed: false,
-    }));
   };
 
   // Subscribe to real physical accelerometer collision shocks (> 3.0G)
@@ -647,172 +446,241 @@ export default function App() {
   // Accelerate
   const handleAccelerate = () => {
     cabAudio.playKeyClick();
-    const currentT = telemetryRef.current;
-    const baseSpeed = Math.max(phoneSensors.getState().gps.speedKmh, currentT.speedKmh);
-    const nextSpeed = Math.min(115, baseSpeed + 8);
-    phoneSensors.injectSimulatedSpeed(nextSpeed, 5500);
+    setTelemetry((prev) => {
+      const nextSpeed = Math.min(115, prev.speedKmh + 6);
+      const isOver = nextSpeed > prev.speedLimitKmh;
+
+      if (isOver && prev.safetyStatus !== 'RESTRICTED_GOVERNOR') {
+        cabAudio.playWarningBuzzer();
+        logEvent('Speed Threshold Exceeded', 'warning', 'SPD-GOV', `Vehicle at ${nextSpeed} km/h exceeding ${prev.speedLimitKmh} km/h limit.`);
+      }
+
+      return {
+        ...prev,
+        speedKmh: nextSpeed,
+        rpm: Math.min(4800, prev.rpm + 320),
+        safetyStatus: isOver ? 'RESTRICTED_GOVERNOR' : 'OPERATIONAL_READY',
+      };
+    });
   };
 
   // Brake
   const handleBrake = () => {
     cabAudio.playKeyClick();
-    const currentT = telemetryRef.current;
-    const baseSpeed = Math.max(phoneSensors.getState().gps.speedKmh, currentT.speedKmh);
-    const nextSpeed = Math.max(0, baseSpeed - 12);
-    phoneSensors.injectSimulatedSpeed(nextSpeed, 3000);
+    setTelemetry((prev) => {
+      const nextSpeed = Math.max(0, prev.speedKmh - 10);
+      return {
+        ...prev,
+        speedKmh: nextSpeed,
+        rpm: Math.max(750, prev.rpm - 400),
+        safetyStatus: nextSpeed <= prev.speedLimitKmh && prev.dockLocked && prev.interlock.status === 'passed'
+          ? 'OPERATIONAL_READY'
+          : prev.safetyStatus,
+      };
+    });
   };
 
   // Toggle Magnetic Dock Mount
   const handleToggleDock = () => {
-    const currentT = telemetryRef.current;
-    const newDock = !currentT.dockLocked;
+    setTelemetry((prev) => {
+      const newDock = !prev.dockLocked;
 
-    if (!newDock) {
-      cabAudio.playWarningBuzzer();
-      logEvent(
-        'Handset Removed From Dock',
-        'warning',
-        'DCK-WARN',
-        'Phone unlatched while transit active. Ignition cut-off initiated to prevent distracted driving.'
-      );
+      if (!newDock) {
+        // Handset undocked while in cab
+        cabAudio.playWarningBuzzer();
+        logEvent(
+          'Handset Removed From Dock',
+          'warning',
+          'DCK-WARN',
+          'Phone unlatched while transit active. Ignition cut-off initiated to prevent distracted driving.'
+        );
 
-      setTelemetry((prev) => ({
-        ...prev,
-        dockLocked: false,
-        safetyStatus: 'IMMOBILIZED',
-        ignitionRelayClosed: false,
-        speedKmh: Math.max(0, prev.speedKmh - 15),
-      }));
-    } else {
-      cabAudio.playRelaySolenoid(true);
-      logEvent(
-        'Handset Secured In Dock',
-        'info',
-        'DCK-LOK',
-        'NFC hardware lock verified on cab dashboard mount.'
-      );
+        return {
+          ...prev,
+          dockLocked: false,
+          safetyStatus: 'IMMOBILIZED',
+          ignitionRelayClosed: false,
+          speedKmh: Math.max(0, prev.speedKmh - 15),
+        };
+      } else {
+        // Handset docked
+        cabAudio.playRelaySolenoid(true);
+        logEvent(
+          'Handset Secured In Dock',
+          'info',
+          'DCK-LOK',
+          'NFC hardware lock verified on cab dashboard mount.'
+        );
 
-      setTelemetry((prev) => {
         const canUnlock = prev.interlock.status === 'passed';
+
         return {
           ...prev,
           dockLocked: true,
           safetyStatus: canUnlock ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
           ignitionRelayClosed: canUnlock,
         };
+      }
+    });
+  };
+
+  // Log Event
+  const logEvent = (
+    title: string,
+    severity: 'info' | 'warning' | 'emergency',
+    code: string,
+    description: string
+  ) => {
+    const newEvt: IncidentEvent = {
+      id: `evt-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString(),
+      title,
+      severity,
+      code,
+      description,
+      telemetrySnapshot: {
+        speedKmh: telemetry.speedKmh,
+        location: `LAT ${telemetry.gps.latitude.toFixed(4)}, LON ${telemetry.gps.longitude.toFixed(4)}`,
+      },
+    };
+    setEvents((prev) => [newEvt, ...prev]);
+
+    // Persist to Firestore if user is authenticated
+    if (currentUser) {
+      addDoc(collection(db, 'incidents'), {
+        ...newEvt,
+        userId: currentUser.uid,
+        cabUnitId: telemetry.cabUnitId,
+      }).catch((err) => {
+        console.warn('Incident Firestore sync:', err);
       });
     }
   };
 
   // Complete Pre-Shift Verification
   const handleCompleteVerification = (driverPin: string, bac: number) => {
-    logEvent(
-      'Driver Pre-Shift Verification Complete',
-      'info',
-      'INT-PASS',
-      `Driver PIN ${driverPin} authenticated. Breathalyzer verified at ${bac.toFixed(2)}% BAC.`
-    );
+    setTelemetry((prev) => {
+      logEvent(
+        'Driver Pre-Shift Verification Complete',
+        'info',
+        'INT-PASS',
+        `Driver PIN ${driverPin} authenticated. Breathalyzer verified at ${bac.toFixed(2)}% BAC.`
+      );
 
-    setTelemetry((prev) => ({
-      ...prev,
-      interlock: {
-        status: 'passed',
-        bacPercent: bac,
-        lastTestTimestamp: new Date().toLocaleTimeString(),
-        driverPinVerified: true,
-      },
-      safetyStatus: prev.dockLocked ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
-      ignitionRelayClosed: prev.dockLocked,
-    }));
+      return {
+        ...prev,
+        interlock: {
+          status: 'passed',
+          bacPercent: bac,
+          lastTestTimestamp: new Date().toLocaleTimeString(),
+          driverPinVerified: true,
+        },
+        safetyStatus: prev.dockLocked ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
+        ignitionRelayClosed: prev.dockLocked,
+      };
+    });
   };
 
   // Emergency SOS Trigger
   const handleTriggerSos = () => {
     const activeNum = emergencyCallManager.getPhoneNumber();
-    const currentT = telemetryRef.current;
     cabAudio.playEmergencyAlarm();
+    setTelemetry((prev) => {
+      callEmergencyNumber(activeNum, {
+        unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
+        latitude: prev.gps.latitude,
+        longitude: prev.gps.longitude,
+        reason: 'SOS',
+      });
+      logEvent(
+        `EMERGENCY SOS DISPATCH TRIGGERED — CALLING ${activeNum}`,
+        'emergency',
+        'SOS-ALARM',
+        `In-cab emergency button engaged. Emergency call to ${activeNum} placed.`
+      );
 
-    callEmergencyNumber(activeNum, {
-      unitNumber: currentT.selectedVehicle?.unitNumber || currentT.cabUnitId,
-      latitude: currentT.gps.latitude,
-      longitude: currentT.gps.longitude,
-      reason: 'SOS',
+      return {
+        ...prev,
+        sosActive: true,
+        safetyStatus: 'EMERGENCY_CRITICAL',
+        ignitionRelayClosed: false,
+        speedKmh: 0,
+        rpm: 0,
+      };
     });
-
-    logEvent(
-      `EMERGENCY SOS DISPATCH TRIGGERED — CALLING ${activeNum}`,
-      'emergency',
-      'SOS-ALARM',
-      `In-cab emergency button engaged. Instant speakerphone call to ${activeNum} connected.`
-    );
-
-    setTelemetry((prev) => ({
-      ...prev,
-      sosActive: true,
-      safetyStatus: 'EMERGENCY_CRITICAL',
-      ignitionRelayClosed: false,
-      speedKmh: 0,
-      rpm: 0,
-    }));
   };
 
   // Cancel SOS
   const handleCancelSos = () => {
     cabAudio.playSuccessChime();
     emergencyCallManager.endCall();
-    logEvent(
-      'Emergency SOS Cancelled',
-      'info',
-      'SOS-CANCEL',
-      'Driver cancelled emergency dispatch alarm. Stand down signal transmitted.'
-    );
+    setTelemetry((prev) => {
+      logEvent(
+        'Emergency SOS Cancelled',
+        'info',
+        'SOS-CANCEL',
+        'Driver cancelled emergency dispatch alarm. Stand down signal transmitted.'
+      );
 
-    setTelemetry((prev) => ({
-      ...prev,
-      sosActive: false,
-      safetyStatus: prev.dockLocked && prev.interlock.status === 'passed' ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
-      ignitionRelayClosed: prev.dockLocked && prev.interlock.status === 'passed',
-    }));
+      return {
+        ...prev,
+        sosActive: false,
+        safetyStatus: prev.dockLocked && prev.interlock.status === 'passed' ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
+        ignitionRelayClosed: prev.dockLocked && prev.interlock.status === 'passed',
+      };
+    });
   };
 
   // Simulate Hard Impact / Pothole
   const handleSimulateImpact = (isCollision: boolean = false) => {
-    const g = isCollision ? 3.85 : 1.72;
+    const g = isCollision ? 3.85 : 1.62;
     if (isCollision) {
       handleCrashDetected(g);
       return;
     }
 
-    cabAudio.playWarningBuzzer();
-    logEvent(
-      `Rough Road / Pothole Shock Event (${g}G)`,
-      'warning',
-      'ROUGH-TERRAIN',
-      `Accelerometer registered ${g}G shock vector on cab axis.`
-    );
+    setTelemetry((prev) => {
+      cabAudio.playWarningBuzzer();
+      logEvent(
+        'Rough Road / Pothole Shock Event',
+        'warning',
+        'ROUGH-TERRAIN',
+        `Accelerometer registered ${g}G shock vector on cab axis.`
+      );
 
-    setTelemetry((prev) => ({
-      ...prev,
-      gForce: {
-        ...prev.gForce,
-        peak: Math.max(prev.gForce.peak, g),
-      },
-    }));
+      return {
+        ...prev,
+        gForce: {
+          ...prev.gForce,
+          peak: g,
+        },
+      };
+    });
   };
 
   // Simulate Governor Over-Speed Event
   const handleSimulateOverSpeed = () => {
-    const currentT = telemetryRef.current;
-    const spikedSpeed = currentT.speedLimitKmh + 18;
-    lastOverspeedLogTimeRef.current = 0; // Allow immediate recording in subscribeSpeed
-    phoneSensors.injectSimulatedSpeed(spikedSpeed, 6000);
+    cabAudio.playWarningBuzzer();
+    setTelemetry((p) => {
+      const spikedSpeed = p.speedLimitKmh + 15;
+      logEvent(
+        'Speed Governor Limit Exceeded',
+        'warning',
+        'SPD-GOV',
+        `Speed accelerated to ${spikedSpeed} km/h, exceeding ${p.selectedVehicle?.name || 'unit'} governor limit (${p.speedLimitKmh} km/h).`
+      );
+      return {
+        ...p,
+        speedKmh: spikedSpeed,
+        safetyStatus: 'RESTRICTED_GOVERNOR',
+      };
+    });
   };
 
   // Presets
   const handleLoadPreset = (preset: 'cold_start' | 'highway_safe' | 'distraction' | 'collision') => {
     if (preset === 'cold_start') {
       cabAudio.playRelaySolenoid(false);
-      phoneSensors.injectSimulatedSpeed(0, 2000);
       setTelemetry((prev) => ({
         ...prev,
         speedKmh: 0,
@@ -828,30 +696,30 @@ export default function App() {
         },
         sosActive: false,
       }));
-      logEvent('Preset: Cold Start', 'warning', 'PST-COLD', 'Engine cold start. Awaiting dock & breath interlock.', { speedKmh: 0 });
+      logEvent('Preset: Cold Start', 'warning', 'PST-COLD', 'Engine cold start. Awaiting dock & breath interlock.');
     } else if (preset === 'highway_safe') {
       cabAudio.playRelaySolenoid(true);
-      const safeCruiseSpeed = Math.max(25, Math.min(telemetryRef.current.speedLimitKmh - 5, 50));
-      phoneSensors.injectSimulatedSpeed(safeCruiseSpeed, 5500);
-      setTelemetry((prev) => ({
-        ...prev,
-        speedKmh: safeCruiseSpeed,
-        rpm: 1950,
-        dockLocked: true,
-        safetyStatus: 'OPERATIONAL_READY',
-        ignitionRelayClosed: true,
-        interlock: {
-          ...prev.interlock,
-          status: 'passed',
-          bacPercent: 0.00,
-          driverPinVerified: true,
-        },
-        sosActive: false,
-      }));
-      logEvent('Preset: Safe Cruise', 'info', 'PST-SAFE', 'Safe operational envelope active within vehicle governor limit.', { speedKmh: safeCruiseSpeed });
+      setTelemetry((prev) => {
+        const safeCruiseSpeed = Math.min(prev.speedLimitKmh - 5, 50);
+        return {
+          ...prev,
+          speedKmh: Math.max(25, safeCruiseSpeed),
+          rpm: 1950,
+          dockLocked: true,
+          safetyStatus: 'OPERATIONAL_READY',
+          ignitionRelayClosed: true,
+          interlock: {
+            ...prev.interlock,
+            status: 'passed',
+            bacPercent: 0.00,
+            driverPinVerified: true,
+          },
+          sosActive: false,
+        };
+      });
+      logEvent('Preset: Safe Cruise', 'info', 'PST-SAFE', 'Safe operational envelope active within vehicle governor limit.');
     } else if (preset === 'distraction') {
       cabAudio.playWarningBuzzer();
-      phoneSensors.injectSimulatedSpeed(35, 5000);
       setTelemetry((prev) => ({
         ...prev,
         speedKmh: 35,
@@ -861,7 +729,7 @@ export default function App() {
         ignitionRelayClosed: false,
         sosActive: false,
       }));
-      logEvent('Preset: Distracted Driving (Undocked at 35 km/h)', 'warning', 'PST-DIST', 'Phone undocked while moving at 35 km/h. Engine throttled.', { speedKmh: 35 });
+      logEvent('Preset: Distracted Driving', 'warning', 'PST-DIST', 'Phone undocked while moving. Engine throttled.');
     } else if (preset === 'collision') {
       handleSimulateImpact(true);
     }
@@ -1109,67 +977,12 @@ export default function App() {
         onOpenVehicleSelector={() => setIsVehicleSelectorOpen(true)}
         onOpenGasRemediation={() => setIsGasRemediationOpen(true)}
         onResetSimulation={handleResetSimulation}
-        onTriggerInstantCall={() => {
-          const activeNum = emergencyCallManager.getPhoneNumber();
-          logEvent(
-            `DIRECT EMERGENCY CALL CONNECTED — ${activeNum}`,
-            'emergency',
-            'DIRECT-CALL',
-            `Instant speakerphone call connected to ${activeNum}.`
-          );
-        }}
         userProfile={userProfile}
         onLogout={logout}
       />
 
       {/* Main Viewport Container (Edge-to-Edge Full Screen on Phone) */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-2.5 sm:p-5 flex flex-col">
-        {/* Live Incident Recorded Banner (Confirms High-Speed, G-Force & Safety Incidents are Recorded) */}
-        {latestIncidentToast && (
-          <div
-            className={`mb-3 p-2.5 sm:p-3 rounded-xl border-2 flex items-center justify-between gap-2 shadow-xl transition-all ${
-              latestIncidentToast.severity === 'emergency'
-                ? 'bg-[#2a080c] border-[#ef4444] text-white'
-                : 'bg-[#241a08] border-[#f59e0b] text-white'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <AlertTriangle
-                className={`w-5 h-5 shrink-0 ${
-                  latestIncidentToast.severity === 'emergency' ? 'text-[#ef4444]' : 'text-[#f59e0b]'
-                }`}
-              />
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded bg-black/50 text-[#4edea3] uppercase">
-                    INCIDENT RECORDED · {latestIncidentToast.code}
-                  </span>
-                  {latestIncidentToast.telemetrySnapshot && (
-                    <span className="text-[10px] font-mono text-[#ffc174] font-bold">
-                      {latestIncidentToast.telemetrySnapshot.speedKmh} KM/H
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs font-headline font-bold text-white truncate mt-0.5">
-                  {latestIncidentToast.title}
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                cabAudio.playKeyClick();
-                setLatestIncidentToast(null);
-                setActiveTab('logs');
-              }}
-              className="px-3 py-1.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-[#051424] font-headline font-extrabold text-xs shrink-0 cursor-pointer"
-            >
-              VIEW LOGS ({events.length})
-            </button>
-          </div>
-        )}
-
         {/* Desktop/Tablet Navigation Tabs (Hidden on Mobile Phone — Mobile uses Fixed Bottom Nav) */}
         <div className="hidden sm:flex items-center gap-2 mb-4 overflow-x-auto pb-1 border-b border-[#30363d]">
           <button
@@ -1307,7 +1120,6 @@ export default function App() {
                       onOpenEspModal={() => setIsEspModalOpen(true)}
                       onToggleCruise={() => setIsCruiseActive(!isCruiseActive)}
                       isCruiseActive={isCruiseActive}
-                      onSimulateOverSpeed={handleSimulateOverSpeed}
                     />
 
                     {/* MQ-9 Gas Safety Control & Threshold Card */}
@@ -1507,7 +1319,6 @@ export default function App() {
                     onOpenEspModal={() => setIsEspModalOpen(true)}
                     onToggleCruise={() => setIsCruiseActive(!isCruiseActive)}
                     isCruiseActive={isCruiseActive}
-                    onSimulateOverSpeed={handleSimulateOverSpeed}
                   />
 
                   {/* Immediate Emergency SOS Action directly below Speedometer for Full-Screen Phone */}
@@ -1818,12 +1629,12 @@ export default function App() {
             cabAudio.playKeyClick();
             setActiveTab('logs');
           }}
-          className={`relative flex flex-col items-center justify-center py-1.5 rounded transition-colors ${
+          className={`flex flex-col items-center justify-center py-1.5 rounded transition-colors ${
             activeTab === 'logs' ? 'text-[#f59e0b] bg-[#1c2b3c]' : 'text-[#94a3b8]'
           }`}
         >
           <ClipboardList className="w-4 h-4" />
-          <span className="text-[9px] font-headline font-bold mt-0.5">LOGS ({events.length})</span>
+          <span className="text-[9px] font-headline font-bold mt-0.5">LOGS</span>
         </button>
 
         <button

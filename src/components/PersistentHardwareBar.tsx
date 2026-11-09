@@ -1,14 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { 
+  Radio, 
   Cpu, 
   Smartphone, 
   ShieldCheck, 
   Volume2, 
   VolumeX, 
   PhoneCall,
-  PhoneOff,
-  Mic,
-  MicOff,
   RotateCcw,
   Truck,
   Flame,
@@ -22,7 +20,6 @@ import { cabAudio } from '../utils/audio';
 import { FleetUserProfile } from '../context/AuthContext';
 import {
   DEFAULT_EMERGENCY_PHONE_NUMBER,
-  callEmergencyNumber,
   emergencyCallManager,
   EmergencyCallState,
 } from '../utils/emergencyDialer';
@@ -39,7 +36,6 @@ interface PersistentHardwareBarProps {
   onOpenVehicleSelector: () => void;
   onOpenGasRemediation?: () => void;
   onResetSimulation: () => void;
-  onTriggerInstantCall?: () => void;
   userProfile?: FleetUserProfile | null;
   onLogout?: () => void;
 }
@@ -54,7 +50,6 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
   onOpenVehicleSelector,
   onOpenGasRemediation,
   onResetSimulation,
-  onTriggerInstantCall,
   userProfile,
   onLogout,
 }) => {
@@ -77,32 +72,12 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
     setIsConfigNumberOpen(false);
   };
 
-  const formatDuration = (sec: number) => {
-    const mins = Math.floor(sec / 60).toString().padStart(2, '0');
-    const secs = (sec % 60).toString().padStart(2, '0');
-    return `${mins}:${secs}`;
-  };
-
   const activePhone = callState.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
-  const isCallConnected = callState.status === 'connected';
-
-  const handleInstantCallClick = () => {
-    cabAudio.playKeyClick();
-    callEmergencyNumber(activePhone, {
-      unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
-      latitude: telemetry.gps.latitude,
-      longitude: telemetry.gps.longitude,
-      reason: 'DIRECT',
-    });
-    if (onTriggerInstantCall) {
-      onTriggerInstantCall();
-    }
-  };
 
   return (
     <header className="relative z-30 bg-[#0d1c2d] border-b border-[#30363d] px-3 sm:px-5 pt-2.5 pb-2.5 shadow-md">
       <div className="max-w-7xl mx-auto flex flex-col gap-2.5">
-        {/* ROW 1: Brand + Instant 0ms Call Now + Configure Number */}
+        {/* ROW 1: Brand + Direct <a href="tel:82199">Call Now</a> + Configure Number */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           {/* Left: Brand & Active Unit */}
           <div className="flex items-center gap-2">
@@ -121,30 +96,20 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
             </div>
           </div>
 
-          {/* Right: Instant 0ms Call Now Button + Configure Number Button */}
+          {/* Right: Direct Call Now (<a href="tel:82199">Call Now</a>) + Configure Number Button */}
           <div className="flex items-center gap-2">
-            {isCallConnected ? (
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.endCall();
-                }}
-                className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-md transition-transform active:scale-95 select-none cursor-pointer"
-              >
-                <span className="w-2 h-2 rounded-full bg-black animate-ping" />
-                <span>LIVE {activePhone} · {formatDuration(callState.durationSeconds)}</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleInstantCallClick}
-                className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#ef4444] hover:bg-[#dc2626] active:bg-[#b91c1c] text-white font-headline font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-md transition-transform active:scale-95 select-none cursor-pointer"
-              >
-                <PhoneCall className="w-4 h-4 fill-white shrink-0" />
-                <span>Call Now ({activePhone})</span>
-              </button>
-            )}
+            {/* Exact <a href="tel:82199">Call Now</a> link */}
+            <a
+              href={`tel:${activePhone}`}
+              onClick={() => {
+                cabAudio.playKeyClick();
+                emergencyCallManager.triggerNativeTelCall(activePhone);
+              }}
+              className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#ef4444] hover:bg-[#dc2626] active:bg-[#b91c1c] text-white font-headline font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-md transition-transform active:scale-95 select-none cursor-pointer"
+            >
+              <PhoneCall className="w-4 h-4 fill-white shrink-0" />
+              <span>Call Now ({activePhone})</span>
+            </a>
 
             {/* Configure Emergency Number Button */}
             <button
@@ -198,72 +163,6 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
             )}
           </div>
         </div>
-
-        {/* LIVE CONNECTED INSTANT SPEAKERPHONE BAR (Appears immediately at 0ms when Call Now / Crash / SOS is active) */}
-        {isCallConnected && (
-          <div className="p-2.5 sm:p-3 rounded-xl bg-[#062419] border-2 border-[#10b981] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-lg">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-full bg-[#10b981] text-black flex items-center justify-center shrink-0">
-                <PhoneCall className="w-4 h-4 fill-black animate-pulse" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono text-xs font-extrabold text-[#10b981] uppercase">
-                    INSTANT CALL CONNECTED ({activePhone}) · {formatDuration(callState.durationSeconds)}
-                  </span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/50 text-[#4edea3]">
-                    SPEAKERPHONE ON · MIC {callState.isMuted ? 'MUTED' : `${Math.max(20, callState.micLevel)}%`}
-                  </span>
-                </div>
-                <p className="text-[11px] font-mono text-[#d4e4fa] truncate">
-                  {callState.dispatchTranscript}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.toggleMute();
-                }}
-                className={`min-h-[36px] px-3 py-1 rounded-lg font-headline font-bold text-xs flex items-center gap-1.5 cursor-pointer border ${
-                  callState.isMuted
-                    ? 'bg-[#ef4444]/20 border-[#ef4444] text-[#ff938c]'
-                    : 'bg-[#10b981]/20 border-[#10b981] text-white'
-                }`}
-              >
-                {callState.isMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5 text-[#10b981]" />}
-                <span>{callState.isMuted ? 'UNMUTE' : 'MUTE'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.reannounceDispatch();
-                }}
-                className="min-h-[36px] px-3 py-1 rounded-lg bg-[#162737] text-[#ffc174] border border-[#f59e0b]/40 font-headline font-bold text-xs flex items-center gap-1 cursor-pointer"
-              >
-                <Volume2 className="w-3.5 h-3.5 text-[#f59e0b]" />
-                <span>REPEAT</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.endCall();
-                }}
-                className="min-h-[36px] px-3 py-1 rounded-lg bg-[#ef4444] hover:bg-[#dc2626] text-white font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer"
-              >
-                <PhoneOff className="w-3.5 h-3.5" />
-                <span>END CALL</span>
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* INLINE CONFIGURE EMERGENCY NUMBER PANEL (Opens when SET # is tapped) */}
         {isConfigNumberOpen && (

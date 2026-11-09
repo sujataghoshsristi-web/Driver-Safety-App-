@@ -107,28 +107,9 @@ class PhoneSensorsManager {
   private emitScheduled: boolean = false;
   private lastEmitTime: number = 0;
   private lastSpeedEmitTime: number = 0;
-  private simulatedSpeedHoldUntil: number = 0;
 
   constructor() {
     this.initStaticSensors();
-  }
-
-  /**
-   * Injects a target velocity into the 60FPS sensor pipeline (used when testing Over-Speed or Presets)
-   * so idle stationary sensors do not immediately overwrite the test velocity.
-   */
-  public injectSimulatedSpeed(speedKmh: number, holdMs: number = 5500) {
-    this.imuSpeedMs = speedKmh / 3.6;
-    this.fusedSpeedMs = Math.max(this.gpsSpeedMs, this.imuSpeedMs);
-    this.simulatedSpeedHoldUntil = Date.now() + holdMs;
-    this.state.gps = {
-      ...this.state.gps,
-      active: true,
-      speedKmh: Math.round(speedKmh),
-    };
-    this.lastSpeedEmitTime = 0;
-    this.emitFastSpeed();
-    this.emit(true);
   }
 
   public getState(): PhoneSensorsState {
@@ -417,11 +398,10 @@ class PhoneSensorsManager {
 
     // Deadband of 0.26 m/s^2 filters out idle table noise while responding within 16ms to real movement
     if (netDynamicAcc > 0.26) {
-      const gain = netDynamicAcc > 1.5 ? 4.2 : 2.6;
-      this.imuSpeedMs = Math.min(35, this.imuSpeedMs + (netDynamicAcc - 0.2) * dtSec * gain);
-    } else if (Date.now() > this.simulatedSpeedHoldUntil) {
-      // Smooth natural coasting decay when motion stops (unless holding a simulated high-speed test)
-      this.imuSpeedMs = this.imuSpeedMs * 0.92;
+      this.imuSpeedMs = Math.min(35, this.imuSpeedMs + (netDynamicAcc - 0.2) * dtSec * 2.4);
+    } else {
+      // Smooth natural coasting decay when motion stops
+      this.imuSpeedMs = this.imuSpeedMs * 0.91;
       if (this.imuSpeedMs < 0.18) this.imuSpeedMs = 0;
     }
 

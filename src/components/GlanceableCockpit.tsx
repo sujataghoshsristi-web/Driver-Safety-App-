@@ -27,7 +27,6 @@ interface GlanceableCockpitProps {
   isCruiseActive: boolean;
   isRealGpsSpeed?: boolean;
   onToggleGpsSpeed?: () => void;
-  onSimulateOverSpeed?: () => void;
 }
 
 export const GlanceableCockpit: React.FC<GlanceableCockpitProps> = ({
@@ -36,7 +35,6 @@ export const GlanceableCockpit: React.FC<GlanceableCockpitProps> = ({
   onOpenPreShift,
   onOpenEspModal,
   isRealGpsSpeed = true,
-  onSimulateOverSpeed,
 }) => {
   // Direct 60FPS hardware velocity state so the speedometer dial never waits on full App re-renders
   const [fastVelocity, setFastVelocity] = useState({
@@ -227,26 +225,15 @@ export const GlanceableCockpit: React.FC<GlanceableCockpitProps> = ({
               </span>
             </div>
             
-            <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-mono text-[#94a3b8]">LIMIT:</span>
               <span className="px-2 py-0.5 rounded bg-[#21262d] border border-[#30363d] font-mono text-xs font-bold text-[#f59e0b]">
                 {telemetry.speedLimitKmh} KM/H
               </span>
-              {isOverSpeed ? (
+              {isOverSpeed && (
                 <span className="px-2 py-0.5 rounded bg-[#ef4444] text-white text-[10px] font-mono font-bold animate-pulse">
-                  OVER LIMIT (RECORDED)
+                  OVER LIMIT
                 </span>
-              ) : (
-                onSimulateOverSpeed && (
-                  <button
-                    type="button"
-                    onClick={onSimulateOverSpeed}
-                    className="px-2 py-0.5 rounded bg-[#ef4444]/20 hover:bg-[#ef4444]/30 border border-[#ef4444]/50 text-[#ff938c] text-[10px] font-mono font-bold cursor-pointer active:scale-95"
-                    title="Test High-Speed Violation Incident Recording"
-                  >
-                    TEST HIGH-SPEED
-                  </button>
-                )
               )}
             </div>
           </div>
