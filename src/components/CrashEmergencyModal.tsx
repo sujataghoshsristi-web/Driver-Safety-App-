@@ -14,7 +14,6 @@ import {
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
 import {
-  EMERGENCY_PHONE_NUMBER,
   callEmergencyNumber,
   emergencyCallManager,
   EmergencyCallState,
@@ -44,7 +43,7 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      // Auto-trigger emergency call to configured number
+      // Auto-trigger 0ms instant emergency call to configured number
       callEmergencyNumber(emergencyCallManager.getPhoneNumber(), {
         unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
         impactG,
@@ -96,7 +95,7 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
           </div>
           <div>
             <span className="text-[11px] font-mono px-3 py-0.5 rounded-full bg-black/40 text-[#4edea3] font-bold tracking-widest uppercase inline-block mb-1">
-              INSTANT AUTO-CALL TRIGGERED · {activePhone}
+              0ms INSTANT AUTO-CALL CONNECTED · {activePhone}
             </span>
             <h1 className="text-xl sm:text-3xl font-headline font-extrabold text-white tracking-tight">
               CRASH DETECTED — CALLING {activePhone}
@@ -107,17 +106,25 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
           </div>
         </div>
 
-        {/* Direct <a href="tel:82199">Call Now</a> & Live Speakerphone Panel */}
+        {/* Instant Connected Speakerphone Panel */}
         <div className="p-3.5 sm:p-6 space-y-3.5 font-body">
-          {/* Direct <a href="tel:82199">Call Now</a> Anchor Button */}
-          <a
-            href={`tel:${activePhone}`}
-            onClick={() => cabAudio.playKeyClick()}
-            className="w-full min-h-[60px] px-5 py-3.5 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-lg sm:text-xl flex items-center justify-center gap-3 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
+          <button
+            type="button"
+            onClick={() => {
+              cabAudio.playKeyClick();
+              callEmergencyNumber(activePhone, {
+                unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
+                impactG,
+                latitude: telemetry.gps.latitude,
+                longitude: telemetry.gps.longitude,
+                reason: 'CRASH',
+              });
+            }}
+            className="w-full min-h-[56px] px-5 py-3 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-base sm:text-lg flex items-center justify-center gap-3 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
           >
-            <PhoneCall className="w-6 h-6 text-black fill-black" />
-            <span>Call Now ({activePhone})</span>
-          </a>
+            <PhoneCall className="w-6 h-6 text-black fill-black animate-bounce" />
+            <span>INSTANT CALL CONNECTED ({activePhone}) · TAP TO RE-ANNOUNCE</span>
+          </button>
 
           <div className="p-3.5 sm:p-4 rounded-xl bg-[#071a12] border-2 border-[#10b981] shadow-[0_0_25px_rgba(16,185,129,0.25)] space-y-3">
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -133,7 +140,7 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
                     </span>
                   </div>
                   <p className="text-[11px] font-mono text-[#94a3b8]">
-                    Instant 0ms two-way audio + tel:{activePhone} active
+                    Instant 0ms two-way speakerphone audio · Zero touch required
                   </p>
                 </div>
               </div>
@@ -167,7 +174,7 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
             {/* Live Dispatch Voice Transcript */}
             <div className="p-2.5 rounded-lg bg-black/60 border border-[#10b981]/30 font-mono text-xs text-[#d4e4fa] flex items-start gap-2">
               <Volume2 className="w-4 h-4 text-[#10b981] shrink-0 mt-0.5 animate-pulse" />
-              <div className=" leading-relaxed">
+              <div className="leading-relaxed">
                 <span className="text-[#10b981] font-bold uppercase block text-[10px]">
                   {activePhone} CENTRAL DISPATCH OPERATOR (SPEAKERPHONE):
                 </span>

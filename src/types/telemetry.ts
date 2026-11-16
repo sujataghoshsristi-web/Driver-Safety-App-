@@ -8,7 +8,7 @@ export type SafetyStatus =
 export type BreathalyzerStatus = 'untested' | 'in_progress' | 'passed' | 'failed';
 
 export type EspConnectionType = 'serial' | 'ble' | 'wifi' | 'simulated';
-export type EspDeviceType = 'esp32' | 'nodemcu';
+export type EspDeviceType = 'esp32s3' | 'esp32' | 'nodemcu';
 
 export interface EspSensorPacket {
   dock: boolean;
@@ -16,6 +16,10 @@ export interface EspSensorPacket {
   rawAdc?: number;
   gasPpm?: number;      // MQ-9 Carbon Monoxide & Flammable Gas in PPM
   rawGasAdc?: number;   // Raw ADC from MQ-9 (0-4095 or 0-1023)
+  knock?: boolean;      // KY-031 / SW-420 Knock / Tap / Impact sensor digital pulse
+  knockCount?: number;  // Cumulative knock/tap pulses from microcontroller
+  flame?: boolean;      // KY-026 IR Flame / Fire sensor triggered (true = flame detected)
+  flameRawAdc?: number; // Raw IR flame reading (lower ADC = stronger IR flame on KY-026)
   speed?: number;
   rpm?: number;
   gx?: number;
@@ -145,6 +149,24 @@ export interface PhoneSensorsState {
   };
 }
 
+export interface HardwareSensorsSuiteState {
+  // 1. MQ-3 Alcohol Sensor
+  alcoholBac: number;
+  alcoholRawAdc: number;
+  alcoholLimitBac: number; // Adjustable threshold (default 0.03%)
+  alcoholStatus: 'clean' | 'warning' | 'lockout';
+  // 2. KY-031 / SW-420 Knock & Tap Sensor
+  knockDetected: boolean;
+  knockCount: number;
+  knockSensitivity: 'low' | 'medium' | 'high';
+  lastKnockType: 'none' | 'tap' | 'crash_impact';
+  lastKnockTimestamp: string | null;
+  // 3. KY-026 IR Flame Sensor
+  flameDetected: boolean;
+  flameRawAdc: number; // 0-4095 (4095 = no flame, < 800 = active flame)
+  lastFlameTimestamp: string | null;
+}
+
 export interface TelemetryData {
   speedKmh: number;
   speedLimitKmh: number;
@@ -182,6 +204,7 @@ export interface TelemetryData {
     driverPinVerified: boolean;
   };
   gas: GasSafetyState;         // MQ-9 Gas / Carbon Monoxide Safety Subsystem
+  hardwareSensors: HardwareSensorsSuiteState; // MQ-3 Alcohol + KY-031 Knock/Tap + KY-026 Flame Sensors
   selectedVehicle: FleetVehicle; // Active Fleet Vehicle Profile
   safetyStatus: SafetyStatus;
   ignitionRelayClosed: boolean;

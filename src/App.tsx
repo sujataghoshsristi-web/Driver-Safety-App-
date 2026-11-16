@@ -38,6 +38,7 @@ import { VehicleSelectorModal } from './components/VehicleSelectorModal';
 import { GasRemediationModal } from './components/GasRemediationModal';
 import { GasSafetyCard } from './components/GasSafetyCard';
 import { PhoneSensorsCard } from './components/PhoneSensorsCard';
+import { HardwareSensorsSuiteCard } from './components/HardwareSensorsSuiteCard';
 import { CrashEmergencyModal } from './components/CrashEmergencyModal';
 import { phoneSensors, INITIAL_PHONE_SENSORS_STATE } from './utils/phoneSensorsManager';
 import { EMERGENCY_PHONE_NUMBER, callEmergencyNumber, emergencyCallManager } from './utils/emergencyDialer';
@@ -90,6 +91,20 @@ const INITIAL_TELEMETRY: TelemetryData = {
     lastWarningTimestamp: null,
     status: 'safe',
   },
+  hardwareSensors: {
+    alcoholBac: 0.00,
+    alcoholRawAdc: 180,
+    alcoholLimitBac: 0.03,
+    alcoholStatus: 'clean',
+    knockDetected: false,
+    knockCount: 0,
+    knockSensitivity: 'medium',
+    lastKnockType: 'none',
+    lastKnockTimestamp: null,
+    flameDetected: false,
+    flameRawAdc: 3950,
+    lastFlameTimestamp: null,
+  },
   selectedVehicle: FLEET_VEHICLES[0],
   safetyStatus: 'OPERATIONAL_READY',
   ignitionRelayClosed: true,
@@ -101,7 +116,7 @@ const INITIAL_TELEMETRY: TelemetryData = {
   esp: {
     isConnected: false,
     connectionType: null,
-    deviceType: 'esp32',
+    deviceType: 'esp32s3',
     baudRate: 115200,
     packetsReceived: 0,
     rawLogs: [],
@@ -267,48 +282,119 @@ export default function App() {
     return () => unsubCrash();
   }, []);
 
-  // Subscribe to real-time ESP32 & NodeMCU sensor packets
+  const knockLatchUntilRef = useRef<number>(0);
+  const lastLoggedKnockCountRef = useRef<number>(0);
+  const recentTapTimesRef = useRef<number[]>([]);
+  const flameLatchUntilRef = useRef<number>(0);
+  const flameBaselineAdcRef = useRef<number | null>(null);
+  const lastCrashCallMsRef = useRef<number>(0);
+
+  // Subscribe to real-time ESP32 & NodeMCU sensor packets (MQ-3 Alcohol, KY-031 Knock/Tap, KY-026 Flame, MQ-9 Gas)
   useEffect(() => {
     const unsubPacket = espManager.subscribePacket((packet: EspSensorPacket, rawLine: string) => {
       setTelemetry((prev) => {
-        const isDocked = packet.dock;
+        const nowMs = Date.now();
         const bac = packet.bac;
-        const wasUndocked = !prev.dockLocked && isDocked;
-        const wasDocked = prev.dockLocked && !isDocked;
-
         let safety = prev.safetyStatus;
         let relay = prev.ignitionRelayClosed;
+        let sosActive = prev.sosActive;
 
-        if (wasDocked) {
-          safety = 'IMMOBILIZED';
-          relay = false;
-          cabAudio.playWarningBuzzer();
-          logEvent('ESP Sensor: Handset Undocked', 'warning', 'ESP-DCK-OFF', 'Physical dock reed switch disconnected.');
-        } else if (wasUndocked) {
-          cabAudio.playRelaySolenoid(true);
-          safety = prev.interlock.status === 'passed' && !prev.gas.isLockoutActive ? 'OPERATIONAL_READY' : 'IMMOBILIZED';
-          relay = prev.interlock.status === 'passed' && !prev.gas.isLockoutActive;
-          logEvent('ESP Sensor: Handset Docked', 'info', 'ESP-DCK-ON', 'Physical dock reed switch verified in cradle.');
-        }
-
+        // 1. Process MQ-3 Alcohol Sensor
         let interlockState = prev.interlock;
-        if (bac > 0.03) {
+        let hwSensors = {
+          ...prev.hardwareSensors,
+          alcoholBac: bac,
+          alcoholRawAdc: packet.rawAdc ?? prev.hardwareSensors.alcoholRawAdc,
+        };
+
+        const isAlcoholActive = bac > prev.hardwareSensors.alcoholLimitBac;
+        if (isAlcoholActive) {
           interlockState = {
             ...prev.interlock,
             status: 'failed',
             bacPercent: bac,
           };
+          hwSensors.alcoholStatus = 'lockout';
           safety = 'IMMOBILIZED';
           relay = false;
           cabAudio.playWarningBuzzer();
-          logEvent('ESP Sensor: High Alcohol Vapor Detected', 'emergency', 'ESP-MQ3-FAIL', `MQ-3 detected BAC ${bac.toFixed(2)}%. Ignition locked.`);
+          logEvent(
+            'ESP MQ-3 Sensor: High Alcohol Vapor Detected',
+            'emergency',
+            'ESP-MQ3-FAIL',
+            `MQ-3 detected BAC ${bac.toFixed(3)}% (exceeds ${prev.hardwareSensors.alcoholLimitBac.toFixed(2)}% limit). Ignition locked.`
+          );
+        } else {
+          hwSensors.alcoholStatus = 'clean';
         }
 
-        // Process MQ-9 Gas Sensor Data from ESP32 / NodeMCU
+        // 2. Process KY-031 / SW-420 Knock & Tap Sensor
+        const countIncreased =
+          packet.knockCount !== undefined && packet.knockCount > prev.hardwareSensors.knockCount;
+        const isTapEvent = Boolean(packet.knock) || countIncreased;
+
+        if (packet.knockCount !== undefined) {
+          hwSensors.knockCount = Math.max(prev.hardwareSensors.knockCount, packet.knockCount);
+        }
+
+        let isNewTapPulse = false;
+        if (isTapEvent) {
+          knockLatchUntilRef.current = nowMs + 2500;
+          hwSensors.knockDetected = true;
+          if (packet.knockCount === undefined) {
+            hwSensors.knockCount = prev.hardwareSensors.knockCount + 1;
+          }
+          hwSensors.lastKnockTimestamp = new Date().toLocaleTimeString();
+
+          isNewTapPulse =
+            hwSensors.knockCount !== lastLoggedKnockCountRef.current || !prev.hardwareSensors.knockDetected;
+          if (isNewTapPulse) {
+            lastLoggedKnockCountRef.current = hwSensors.knockCount;
+            recentTapTimesRef.current = [
+              ...recentTapTimesRef.current.filter((t) => nowMs - t < 3500),
+              nowMs,
+            ];
+          }
+        } else if (packet.knock === false && nowMs > knockLatchUntilRef.current) {
+          hwSensors.knockDetected = false;
+        }
+
+        // 3. Process KY-026 IR Flame Sensor (Digital + Analog Baseline Shift Detection)
+        if (packet.flameRawAdc !== undefined && !isNaN(packet.flameRawAdc)) {
+          hwSensors.flameRawAdc = packet.flameRawAdc;
+          if (flameBaselineAdcRef.current === null && !packet.flame && packet.flameRawAdc > 1500) {
+            flameBaselineAdcRef.current = packet.flameRawAdc;
+          }
+        }
+
+        const flameAdcShift =
+          packet.flameRawAdc !== undefined &&
+          flameBaselineAdcRef.current !== null &&
+          Math.abs(packet.flameRawAdc - flameBaselineAdcRef.current) >= 400;
+        const flameAdcLow =
+          packet.flameRawAdc !== undefined &&
+          ((flameBaselineAdcRef.current !== null &&
+            flameBaselineAdcRef.current > 2800 &&
+            packet.flameRawAdc < 2800) ||
+            packet.flameRawAdc < 1200);
+
+        const isFlameTriggeredNow = Boolean(packet.flame) || flameAdcShift || flameAdcLow;
+
+        if (isFlameTriggeredNow) {
+          flameLatchUntilRef.current = nowMs + 4500;
+          hwSensors.flameDetected = true;
+          hwSensors.lastFlameTimestamp = new Date().toLocaleTimeString();
+        } else if (packet.flame === false && nowMs > flameLatchUntilRef.current) {
+          hwSensors.flameDetected = false;
+        }
+
+        // 4. Process MQ-9 Gas / Smoke Sensor Data
         let gasState = prev.gas;
+        let isGasActive = prev.gas.ppm > prev.gas.thresholdPpm;
         if (packet.gasPpm !== undefined) {
           const newPpm = Math.round(packet.gasPpm);
           const isOver = newPpm > gasState.thresholdPpm;
+          isGasActive = isOver;
           let newWarnings = gasState.warningsCount;
           let lockout = gasState.isLockoutActive;
 
@@ -348,13 +434,82 @@ export default function App() {
           };
         }
 
+        // 5. ALL-SENSOR CRASH DETECTION FUSION ENGINE
+        // Combines: (1) Knock/Tap KY-031, (2) Flame/Fire KY-026, (3) Gas/Smoke MQ-9,
+        // (4) Alcohol MQ-3, and (5) Phone G-Force / Rollover Tilt / Cabin Sound
+        const recentTapsCount = recentTapTimesRef.current.filter((t) => nowMs - t < 3500).length;
+        const phoneImpactOrTilt =
+          prev.phoneSensors.accel.totalG >= 2.2 ||
+          Math.abs(prev.phoneSensors.orientation.rollBankDeg) >= 40 ||
+          Math.abs(prev.phoneSensors.orientation.pitchInclineDeg) >= 40 ||
+          prev.phoneSensors.sound.decibelsDb >= 85;
+
+        const activeSensorsList: string[] = [];
+        if (hwSensors.knockDetected) activeSensorsList.push(`KY-031 Knock/Impact (${hwSensors.knockCount} taps)`);
+        if (hwSensors.flameDetected) activeSensorsList.push(`KY-026 Flame/Fire (ADC ${hwSensors.flameRawAdc})`);
+        if (isGasActive) activeSensorsList.push(`MQ-9 Gas/Smoke (${gasState.ppm} PPM)`);
+        if (isAlcoholActive) activeSensorsList.push(`MQ-3 Alcohol (${bac.toFixed(3)}% BAC)`);
+        if (phoneImpactOrTilt) activeSensorsList.push(`Cab G-Force/Tilt (${prev.phoneSensors.accel.totalG.toFixed(2)}G)`);
+
+        const knockCrashTriggered =
+          hwSensors.knockDetected &&
+          (hwSensors.knockSensitivity === 'high' ||
+            (hwSensors.knockSensitivity === 'medium' && recentTapsCount >= 2) ||
+            (hwSensors.knockSensitivity === 'low' && recentTapsCount >= 3));
+
+        const multiSensorFusionCrash =
+          activeSensorsList.length >= 2 && (hwSensors.knockDetected || hwSensors.flameDetected || phoneImpactOrTilt);
+
+        const isCrashConfirmed = hwSensors.flameDetected || knockCrashTriggered || multiSensorFusionCrash;
+
+        if (isCrashConfirmed) {
+          hwSensors.lastKnockType = 'crash_impact';
+          safety = 'EMERGENCY_CRITICAL';
+          relay = false;
+          sosActive = true;
+
+          if (nowMs - lastCrashCallMsRef.current > 6000) {
+            lastCrashCallMsRef.current = nowMs;
+            const activeNum = emergencyCallManager.getPhoneNumber();
+            const fusedG = hwSensors.flameDetected ? 4.5 : multiSensorFusionCrash ? 4.3 : 4.1;
+            cabAudio.playEmergencyAlarm();
+            espManager.sendCommand('RELAY:0');
+            setCrashImpactG(fusedG);
+            setIsCrashModalOpen(true);
+            callEmergencyNumber(activeNum, {
+              unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
+              impactG: fusedG,
+              latitude: prev.gps.latitude,
+              longitude: prev.gps.longitude,
+              reason: 'CRASH',
+            });
+            logEvent(
+              `ALL-SENSOR CRASH CONFIRMED (${activeSensorsList.join(' + ')}) — CALLING ${activeNum}`,
+              'emergency',
+              'MULTI-SENSOR-CRASH',
+              `Multi-sensor fusion confirmed crash/fire [${activeSensorsList.join(', ')}]. Starter & fuel relay cut off. Emergency call placed to ${activeNum}.`
+            );
+          }
+        } else if (isTapEvent && isNewTapPulse) {
+          hwSensors.lastKnockType = 'tap';
+          cabAudio.playWarningBuzzer();
+          logEvent(
+            `ESP Knock/Tap Sensor Pulse (#${hwSensors.knockCount})`,
+            'warning',
+            'ESP-KNOCK-TAP',
+            `KY-031 Knock/Tap sensor registered chassis pulse (#${hwSensors.knockCount}). Tap again quickly or trigger another sensor to confirm crash.`
+          );
+        }
+
         const newLogs = [rawLine, ...prev.esp.rawLogs].slice(0, 25);
 
         return {
           ...prev,
-          dockLocked: isDocked,
+          dockLocked: true,
+          sosActive,
           interlock: interlockState,
           gas: gasState,
+          hardwareSensors: hwSensors,
           safetyStatus: safety,
           ignitionRelayClosed: relay,
           batteryVoltage: packet.volt !== undefined ? packet.volt : prev.batteryVoltage,
@@ -364,7 +519,7 @@ export default function App() {
             x: packet.gx !== undefined ? packet.gx : prev.gForce.x,
             y: packet.gy !== undefined ? packet.gy : prev.gForce.y,
             z: packet.gz !== undefined ? packet.gz : prev.gForce.z,
-            peak: prev.gForce.peak,
+            peak: isCrashConfirmed ? Math.max(prev.gForce.peak, 4.2) : prev.gForce.peak,
           },
           esp: {
             ...prev.esp,
@@ -935,6 +1090,293 @@ export default function App() {
     });
   };
 
+  // --- 3-Sensor Hardware Suite Handlers (MQ-3 Alcohol, KY-031 Knock/Tap, KY-026 Flame) ---
+  const handleUpdateAlcoholLimit = (newLimit: number) => {
+    cabAudio.playKeyClick();
+    setTelemetry((prev) => {
+      const violated = prev.hardwareSensors.alcoholBac > newLimit;
+      return {
+        ...prev,
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          alcoholLimitBac: newLimit,
+          alcoholStatus: violated ? 'lockout' : 'clean',
+        },
+        safetyStatus: violated ? 'IMMOBILIZED' : prev.safetyStatus,
+        ignitionRelayClosed: violated ? false : prev.ignitionRelayClosed,
+      };
+    });
+    logEvent(
+      'MQ-3 Alcohol Threshold Calibrated',
+      'info',
+      'MQ3-LIM-ADJ',
+      `Alcohol interlock threshold adjusted to ${(newLimit * 100).toFixed(2)}% BAC.`
+    );
+  };
+
+  const handleSimulateAlcoholSpike = () => {
+    cabAudio.playWarningBuzzer();
+    if ('vibrate' in navigator) navigator.vibrate([300, 100, 300]);
+    setTelemetry((prev) => {
+      const spikedBac = Number((prev.hardwareSensors.alcoholLimitBac + 0.035).toFixed(3));
+      logEvent(
+        'MQ-3 Alcohol Vapor Spike Detected — Ignition Locked',
+        'emergency',
+        'MQ3-LOCKOUT',
+        `MQ-3 sensor detected ${spikedBac.toFixed(3)}% BAC (Limit: ${prev.hardwareSensors.alcoholLimitBac.toFixed(2)}%). Starter relay cut off.`
+      );
+      return {
+        ...prev,
+        interlock: {
+          ...prev.interlock,
+          status: 'failed',
+          bacPercent: spikedBac,
+        },
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          alcoholBac: spikedBac,
+          alcoholRawAdc: 1480,
+          alcoholStatus: 'lockout',
+        },
+        safetyStatus: 'IMMOBILIZED',
+        ignitionRelayClosed: false,
+        speedKmh: 0,
+        rpm: 0,
+      };
+    });
+  };
+
+  const handleResetAlcohol = () => {
+    cabAudio.playSuccessChime();
+    setTelemetry((prev) => {
+      const canArm = prev.dockLocked && !prev.gas.isLockoutActive && !prev.hardwareSensors.flameDetected;
+      logEvent(
+        'MQ-3 Alcohol Sensor Cleared (0.00% BAC)',
+        'info',
+        'MQ3-CLEAN',
+        'Cabin alcohol vapor cleared. Breathalyzer interlock restored to 0.00% BAC.'
+      );
+      return {
+        ...prev,
+        interlock: {
+          ...prev.interlock,
+          status: 'passed',
+          bacPercent: 0.00,
+        },
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          alcoholBac: 0.00,
+          alcoholRawAdc: 180,
+          alcoholStatus: 'clean',
+        },
+        safetyStatus: canArm ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
+        ignitionRelayClosed: canArm,
+      };
+    });
+  };
+
+  const handleUpdateKnockSensitivity = (sens: 'low' | 'medium' | 'high') => {
+    cabAudio.playKeyClick();
+    setTelemetry((prev) => ({
+      ...prev,
+      hardwareSensors: {
+        ...prev.hardwareSensors,
+        knockSensitivity: sens,
+      },
+    }));
+  };
+
+  const handleSimulateKnock = (isHardCrash: boolean) => {
+    const nowMs = Date.now();
+    knockLatchUntilRef.current = nowMs + 2500;
+    recentTapTimesRef.current = [
+      ...recentTapTimesRef.current.filter((t) => nowMs - t < 3500),
+      nowMs,
+    ];
+    const recentCount = recentTapTimesRef.current.length;
+
+    if (isHardCrash) {
+      setTelemetry((prev) => ({
+        ...prev,
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          knockDetected: true,
+          knockCount: prev.hardwareSensors.knockCount + 1,
+          lastKnockType: 'crash_impact',
+          lastKnockTimestamp: new Date().toLocaleTimeString(),
+        },
+      }));
+      handleCrashDetected(4.25);
+      return;
+    }
+
+    setTelemetry((prev) => {
+      const nextCount = prev.hardwareSensors.knockCount + 1;
+      const otherSensorActive =
+        prev.hardwareSensors.flameDetected ||
+        prev.hardwareSensors.alcoholBac > prev.hardwareSensors.alcoholLimitBac ||
+        prev.gas.ppm > prev.gas.thresholdPpm ||
+        prev.phoneSensors.accel.totalG >= 2.2;
+
+      const isMultiCrash =
+        otherSensorActive ||
+        prev.hardwareSensors.knockSensitivity === 'high' ||
+        (prev.hardwareSensors.knockSensitivity === 'medium' && recentCount >= 2) ||
+        (prev.hardwareSensors.knockSensitivity === 'low' && recentCount >= 3);
+
+      if (isMultiCrash) {
+        const activeNum = emergencyCallManager.getPhoneNumber();
+        cabAudio.playEmergencyAlarm();
+        espManager.sendCommand('RELAY:0');
+        setCrashImpactG(4.25);
+        setIsCrashModalOpen(true);
+        callEmergencyNumber(activeNum, {
+          unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
+          impactG: 4.25,
+          latitude: prev.gps.latitude,
+          longitude: prev.gps.longitude,
+          reason: 'CRASH',
+        });
+        logEvent(
+          `ALL-SENSOR CRASH DETECTED — CALLING ${activeNum}`,
+          'emergency',
+          'MULTI-SENSOR-CRASH',
+          `Knock/Impact sensor + multi-sensor fusion confirmed vehicle crash. Starter relay cut off. Calling ${activeNum}.`
+        );
+        return {
+          ...prev,
+          sosActive: true,
+          safetyStatus: 'EMERGENCY_CRITICAL',
+          ignitionRelayClosed: false,
+          speedKmh: 0,
+          rpm: 0,
+          hardwareSensors: {
+            ...prev.hardwareSensors,
+            knockDetected: true,
+            knockCount: nextCount,
+            lastKnockType: 'crash_impact',
+            lastKnockTimestamp: new Date().toLocaleTimeString(),
+          },
+        };
+      }
+
+      cabAudio.playWarningBuzzer();
+      if ('vibrate' in navigator) navigator.vibrate(120);
+      logEvent(
+        `KY-031 Knock / Tap Sensor Pulse (#${nextCount})`,
+        'warning',
+        'KNOCK-TAP',
+        `Knock/Tap sensor registered physical chassis tap (#${nextCount}).`
+      );
+      return {
+        ...prev,
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          knockDetected: true,
+          knockCount: nextCount,
+          lastKnockType: 'tap',
+          lastKnockTimestamp: new Date().toLocaleTimeString(),
+        },
+      };
+    });
+  };
+
+  const handleResetKnocks = () => {
+    cabAudio.playKeyClick();
+    knockLatchUntilRef.current = 0;
+    recentTapTimesRef.current = [];
+    setTelemetry((prev) => {
+      const canArm =
+        prev.dockLocked &&
+        prev.interlock.status === 'passed' &&
+        !prev.gas.isLockoutActive &&
+        !prev.hardwareSensors.flameDetected;
+      if (canArm) espManager.sendCommand('RELAY:1');
+      return {
+        ...prev,
+        sosActive: prev.hardwareSensors.flameDetected ? prev.sosActive : false,
+        safetyStatus: canArm ? 'OPERATIONAL_READY' : prev.safetyStatus === 'EMERGENCY_CRITICAL' && !prev.hardwareSensors.flameDetected ? 'IMMOBILIZED' : prev.safetyStatus,
+        ignitionRelayClosed: canArm,
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          knockDetected: false,
+          knockCount: 0,
+          lastKnockType: 'none',
+          lastKnockTimestamp: null,
+        },
+      };
+    });
+  };
+
+  const handleSimulateFlame = () => {
+    const activeNum = emergencyCallManager.getPhoneNumber();
+    flameLatchUntilRef.current = Date.now() + 8000;
+    cabAudio.playEmergencyAlarm();
+    espManager.sendCommand('RELAY:0');
+    if ('vibrate' in navigator) navigator.vibrate([400, 150, 400, 150, 600]);
+    setCrashImpactG(4.5);
+    setIsCrashModalOpen(true);
+
+    setTelemetry((prev) => {
+      callEmergencyNumber(activeNum, {
+        unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
+        impactG: 4.5,
+        latitude: prev.gps.latitude,
+        longitude: prev.gps.longitude,
+        reason: 'SOS',
+      });
+      logEvent(
+        `CRITICAL FIRE / FLAME DETECTED (KY-026) — CALLING ${activeNum}`,
+        'emergency',
+        'FLAME-FIRE-SOS',
+        `KY-026 IR Flame sensor triggered cabin/engine fire & crash emergency. Fuel & starter relay cut off. Calling ${activeNum}.`
+      );
+      return {
+        ...prev,
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          flameDetected: true,
+          flameRawAdc: 215,
+          lastFlameTimestamp: new Date().toLocaleTimeString(),
+        },
+        sosActive: true,
+        safetyStatus: 'EMERGENCY_CRITICAL',
+        ignitionRelayClosed: false,
+        speedKmh: 0,
+        rpm: 0,
+      };
+    });
+  };
+
+  const handleResetFlame = () => {
+    cabAudio.playSuccessChime();
+    flameLatchUntilRef.current = 0;
+    flameBaselineAdcRef.current = null;
+    emergencyCallManager.endCall();
+    setIsCrashModalOpen(false);
+    setTelemetry((prev) => {
+      const canArm = prev.dockLocked && prev.interlock.status === 'passed' && !prev.gas.isLockoutActive;
+      if (canArm) espManager.sendCommand('RELAY:1');
+      logEvent(
+        'KY-026 Flame Sensor Reset & Re-Calibrated — Fire Cleared',
+        'info',
+        'FLAME-CLEAR',
+        'IR Flame sensor baseline re-calibrated to ambient light. Fuel & starter relay restored.'
+      );
+      return {
+        ...prev,
+        hardwareSensors: {
+          ...prev.hardwareSensors,
+          flameDetected: false,
+          flameRawAdc: 3950,
+        },
+        sosActive: false,
+        safetyStatus: canArm ? 'OPERATIONAL_READY' : 'IMMOBILIZED',
+        ignitionRelayClosed: canArm,
+      };
+    });
+  };
+
   // Reset simulator
   const handleResetSimulation = () => {
     cabAudio.playSuccessChime();
@@ -1122,6 +1564,22 @@ export default function App() {
                       isCruiseActive={isCruiseActive}
                     />
 
+                    {/* 3-Sensor Hardware Suite: MQ-3 Alcohol + KY-031 Knock/Tap + KY-026 Flame */}
+                    <HardwareSensorsSuiteCard
+                      sensors={telemetry.hardwareSensors}
+                      espConnected={telemetry.esp.isConnected}
+                      ignitionRelayClosed={telemetry.ignitionRelayClosed}
+                      onUpdateAlcoholLimit={handleUpdateAlcoholLimit}
+                      onSimulateAlcoholSpike={handleSimulateAlcoholSpike}
+                      onResetAlcohol={handleResetAlcohol}
+                      onUpdateKnockSensitivity={handleUpdateKnockSensitivity}
+                      onSimulateKnock={handleSimulateKnock}
+                      onResetKnocks={handleResetKnocks}
+                      onSimulateFlame={handleSimulateFlame}
+                      onResetFlame={handleResetFlame}
+                      onOpenEspModal={() => setIsEspModalOpen(true)}
+                    />
+
                     {/* MQ-9 Gas Safety Control & Threshold Card */}
                     <GasSafetyCard
                       gas={telemetry.gas}
@@ -1155,6 +1613,21 @@ export default function App() {
                 )}
                 {activeTab === 'esp' && (
                   <div className="space-y-4">
+                    <HardwareSensorsSuiteCard
+                      sensors={telemetry.hardwareSensors}
+                      espConnected={telemetry.esp.isConnected}
+                      ignitionRelayClosed={telemetry.ignitionRelayClosed}
+                      onUpdateAlcoholLimit={handleUpdateAlcoholLimit}
+                      onSimulateAlcoholSpike={handleSimulateAlcoholSpike}
+                      onResetAlcohol={handleResetAlcohol}
+                      onUpdateKnockSensitivity={handleUpdateKnockSensitivity}
+                      onSimulateKnock={handleSimulateKnock}
+                      onResetKnocks={handleResetKnocks}
+                      onSimulateFlame={handleSimulateFlame}
+                      onResetFlame={handleResetFlame}
+                      onOpenEspModal={() => setIsEspModalOpen(true)}
+                    />
+
                     <div className="bg-[#161b22] border border-[#30363d] rounded p-4 flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 rounded bg-[#f59e0b] text-[#051424] flex items-center justify-center font-bold">
@@ -1165,7 +1638,7 @@ export default function App() {
                             ESP32 / NodeMCU In-Cab Telemetry Hub
                           </h3>
                           <p className="text-xs font-mono text-[#94a3b8]">
-                            STATUS: {telemetry.esp.isConnected ? 'STREAMING ACTIVE (4HZ)' : 'OFFLINE'} · SENSORS: MQ-3, REED, RELAY
+                            STATUS: {telemetry.esp.isConnected ? 'STREAMING ACTIVE (4HZ)' : 'OFFLINE'} · SENSORS: MQ-3, KNOCK, FLAME, GAS, RELAY
                           </p>
                         </div>
                       </div>
@@ -1178,34 +1651,6 @@ export default function App() {
                       >
                         {telemetry.esp.isConnected ? 'CONFIGURE SENSORS' : 'CONNECT HARDWARE'}
                       </button>
-                    </div>
-
-                    {/* Sensor summary cards */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                      <div className="p-3 rounded bg-[#161b22] border border-[#30363d]">
-                        <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">DOCK SWITCH</span>
-                        <span className="text-base font-mono font-bold text-white">
-                          {telemetry.dockLocked ? 'LOCKED' : 'UNDOCKED'}
-                        </span>
-                      </div>
-                      <div className="p-3 rounded bg-[#161b22] border border-[#30363d]">
-                        <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">MQ-3 ALCOHOL</span>
-                        <span className="text-base font-mono font-bold text-[#10b981]">
-                          BAC {telemetry.interlock.bacPercent.toFixed(2)}%
-                        </span>
-                      </div>
-                      <div className="p-3 rounded bg-[#161b22] border border-[#30363d]">
-                        <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">RELAY OUTPUT</span>
-                        <span className="text-base font-mono font-bold text-[#ffc174]">
-                          {telemetry.ignitionRelayClosed ? 'CLOSED (ARMED)' : 'OPEN (CUT-OFF)'}
-                        </span>
-                      </div>
-                      <div className="p-3 rounded bg-[#161b22] border border-[#30363d]">
-                        <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">PACKETS RECVD</span>
-                        <span className="text-base font-mono font-bold text-white">
-                          {telemetry.esp.packetsReceived}
-                        </span>
-                      </div>
                     </div>
                   </div>
                 )}
@@ -1328,6 +1773,22 @@ export default function App() {
                     onCancelSos={handleCancelSos}
                   />
 
+                  {/* 3-Sensor Hardware Suite: MQ-3 Alcohol + KY-031 Knock/Tap + KY-026 Flame */}
+                  <HardwareSensorsSuiteCard
+                    sensors={telemetry.hardwareSensors}
+                    espConnected={telemetry.esp.isConnected}
+                    ignitionRelayClosed={telemetry.ignitionRelayClosed}
+                    onUpdateAlcoholLimit={handleUpdateAlcoholLimit}
+                    onSimulateAlcoholSpike={handleSimulateAlcoholSpike}
+                    onResetAlcohol={handleResetAlcohol}
+                    onUpdateKnockSensitivity={handleUpdateKnockSensitivity}
+                    onSimulateKnock={handleSimulateKnock}
+                    onResetKnocks={handleResetKnocks}
+                    onSimulateFlame={handleSimulateFlame}
+                    onResetFlame={handleResetFlame}
+                    onOpenEspModal={() => setIsEspModalOpen(true)}
+                  />
+
                   {/* MQ-9 Gas & Carbon Monoxide Safety Subsystem */}
                   <GasSafetyCard
                     gas={telemetry.gas}
@@ -1363,6 +1824,21 @@ export default function App() {
 
               {activeTab === 'esp' && (
                 <div className="space-y-4">
+                  <HardwareSensorsSuiteCard
+                    sensors={telemetry.hardwareSensors}
+                    espConnected={telemetry.esp.isConnected}
+                    ignitionRelayClosed={telemetry.ignitionRelayClosed}
+                    onUpdateAlcoholLimit={handleUpdateAlcoholLimit}
+                    onSimulateAlcoholSpike={handleSimulateAlcoholSpike}
+                    onResetAlcohol={handleResetAlcohol}
+                    onUpdateKnockSensitivity={handleUpdateKnockSensitivity}
+                    onSimulateKnock={handleSimulateKnock}
+                    onResetKnocks={handleResetKnocks}
+                    onSimulateFlame={handleSimulateFlame}
+                    onResetFlame={handleResetFlame}
+                    onOpenEspModal={() => setIsEspModalOpen(true)}
+                  />
+
                   <div className="bg-[#161b22] border border-[#30363d] rounded p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded bg-[#f59e0b] text-[#051424] flex items-center justify-center font-bold">
@@ -1384,7 +1860,7 @@ export default function App() {
                           </span>
                         </div>
                         <p className="text-xs font-mono text-[#94a3b8]">
-                          BAUD: 115200 · PROTOCOL: JSON SERIAL OVER USB-OTG / BLE / WI-FI
+                          BAUD: 115200 · SENSORS: MQ-3 ALCOHOL, KY-031 KNOCK/TAP, KY-026 FLAME, MQ-9 GAS
                         </p>
                       </div>
                     </div>
@@ -1405,19 +1881,9 @@ export default function App() {
                   {/* Live Sensor Metrics */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div className="p-3.5 rounded bg-[#161b22] border border-[#30363d]">
-                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">DOCK REED SWITCH</span>
-                      <span className={`text-lg font-mono font-bold ${telemetry.dockLocked ? 'text-[#10b981]' : 'text-[#f59e0b]'}`}>
-                        {telemetry.dockLocked ? 'LOCKED (PIN LOW)' : 'UNDOCKED'}
-                      </span>
-                      <span className="text-[10px] font-mono text-[#94a3b8] block mt-1">
-                        GPIO 4 / D5
-                      </span>
-                    </div>
-
-                    <div className="p-3.5 rounded bg-[#161b22] border border-[#30363d]">
-                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">MQ-3 ALCOHOL VAPOR</span>
+                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">1. MQ-3 ALCOHOL</span>
                       <span className={`text-lg font-mono font-bold ${telemetry.interlock.status === 'passed' ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>
-                        {telemetry.interlock.bacPercent.toFixed(2)}% BAC
+                        {telemetry.hardwareSensors.alcoholBac.toFixed(3)}% BAC
                       </span>
                       <span className="text-[10px] font-mono text-[#94a3b8] block mt-1">
                         GPIO 34 / A0 ADC
@@ -1425,22 +1891,32 @@ export default function App() {
                     </div>
 
                     <div className="p-3.5 rounded bg-[#161b22] border border-[#30363d]">
-                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">12V STARTER RELAY</span>
+                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">2. KNOCK / TAP</span>
+                      <span className={`text-lg font-mono font-bold ${telemetry.hardwareSensors.knockDetected ? 'text-[#f59e0b]' : 'text-[#38bdf8]'}`}>
+                        {telemetry.hardwareSensors.knockCount} TAPS
+                      </span>
+                      <span className="text-[10px] font-mono text-[#94a3b8] block mt-1">
+                        GPIO 27 / D2
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 rounded bg-[#161b22] border border-[#30363d]">
+                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">3. FLAME (KY-026)</span>
+                      <span className={`text-lg font-mono font-bold ${telemetry.hardwareSensors.flameDetected ? 'text-[#ef4444]' : 'text-[#10b981]'}`}>
+                        {telemetry.hardwareSensors.flameDetected ? 'FIRE ALERT!' : 'SAFE (CLEAR)'}
+                      </span>
+                      <span className="text-[10px] font-mono text-[#94a3b8] block mt-1">
+                        GPIO 26 / D7
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 rounded bg-[#161b22] border border-[#30363d]">
+                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">4. STARTER RELAY</span>
                       <span className={`text-lg font-mono font-bold ${telemetry.ignitionRelayClosed ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>
                         {telemetry.ignitionRelayClosed ? 'ARMED (HIGH)' : 'CUT-OFF (LOW)'}
                       </span>
                       <span className="text-[10px] font-mono text-[#94a3b8] block mt-1">
                         GPIO 5 / D1
-                      </span>
-                    </div>
-
-                    <div className="p-3.5 rounded bg-[#161b22] border border-[#30363d]">
-                      <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">PACKETS RECEIVED</span>
-                      <span className="text-lg font-mono font-bold text-white tabular-nums">
-                        {telemetry.esp.packetsReceived}
-                      </span>
-                      <span className="text-[10px] font-mono text-[#4edea3] block mt-1">
-                        RATE: 4 HZ
                       </span>
                     </div>
                   </div>
