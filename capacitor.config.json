@@ -1,0 +1,9 @@
+{
+  "appId": "com.drivelock.safety",
+  "appName": "DriveLock",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  }
+}

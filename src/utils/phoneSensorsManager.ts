@@ -102,6 +102,8 @@ class PhoneSensorsManager {
   private gravY: number = 0;
   private gravZ: number = 9.80665;
   private gravInitialized: boolean = false;
+  private pitchBaselineDeg: number | null = null;
+  private rollBaselineDeg: number | null = null;
   private lastMotionTimestamp: number = 0;
   private lastCrashTriggerTime: number = 0;
   private emitScheduled: boolean = false;
@@ -111,6 +113,26 @@ class PhoneSensorsManager {
 
   constructor() {
     this.initStaticSensors();
+  }
+
+  /**
+   * Re-calibrates resting gravity vector (1.00G) and dashboard mount orientation (0 deg pitch/roll)
+   */
+  public recalibrateBaseline() {
+    this.gravInitialized = false;
+    this.pitchBaselineDeg = null;
+    this.rollBaselineDeg = null;
+    this.state.accel = {
+      ...this.state.accel,
+      totalG: 1.0,
+      peakG: 1.0,
+    };
+    this.state.orientation = {
+      ...this.state.orientation,
+      pitchInclineDeg: 0,
+      rollBankDeg: 0,
+    };
+    this.emit(true);
   }
 
   /**
@@ -473,8 +495,14 @@ class PhoneSensorsManager {
 
   private handleDeviceOrientation = (e: DeviceOrientationEvent) => {
     const compassHeading = Math.round(e.alpha ?? 0);
-    const pitchInclineDeg = Number((e.beta ?? 0).toFixed(1));
-    const rollBankDeg = Number((e.gamma ?? 0).toFixed(1));
+    const rawPitch = e.beta ?? 0;
+    const rawRoll = e.gamma ?? 0;
+
+    if (this.pitchBaselineDeg === null) this.pitchBaselineDeg = rawPitch;
+    if (this.rollBaselineDeg === null) this.rollBaselineDeg = rawRoll;
+
+    const pitchInclineDeg = Number((rawPitch - this.pitchBaselineDeg).toFixed(1));
+    const rollBankDeg = Number((rawRoll - this.rollBaselineDeg).toFixed(1));
 
     this.state.orientation = {
       compassHeading,

@@ -33,7 +33,15 @@ class EspHardwareManager {
   private wifiIpAddress: string = '192.168.4.1';
   private simulationInterval: number | null = null;
   private plainTextKnockCount: number = 0;
-  private flameBaselineAdc: number | null = null;
+  public mq3BaselineAdc: number | null = null;
+  public mq9BaselineAdc: number | null = null;
+  public flameBaselineAdc: number | null = null;
+  public isCalibrating: boolean = true;
+  private calSamples: { mq3: number[]; mq9: number[]; flame: number[] } = {
+    mq3: [],
+    mq9: [],
+    flame: [],
+  };
 
   public isConnected: boolean = false;
   public connectionType: EspConnectionType | null = null;
@@ -42,9 +50,32 @@ class EspHardwareManager {
   private onPacketListeners: PacketCallback[] = [];
   private onStatusListeners: StatusCallback[] = [];
 
+  /**
+   * Resets and re-calibrates all hardware sensor baselines from the next incoming packets
+   * and sends "CAL" command to ESP32-S3 firmware to re-zero hardware baselines.
+   */
+  public recalibrateBaselines() {
+    this.mq3BaselineAdc = null;
+    this.mq9BaselineAdc = null;
+    this.flameBaselineAdc = null;
+    this.isCalibrating = true;
+    this.calSamples = { mq3: [], mq9: [], flame: [] };
+    this.sendCommand('CAL');
+  }
+
+  public getBaselines() {
+    return {
+      isCalibrating: this.isCalibrating,
+      mq3BaselineAdc: this.mq3BaselineAdc,
+      mq9BaselineAdc: this.mq9BaselineAdc,
+      flameBaselineAdc: this.flameBaselineAdc,
+    };
+  }
+
   public subscribePacket(cb: PacketCallback) {
     this.onPacketListeners.push(cb);
     return () => {
+      this.onPacketListeners.filter((l) => l !== cb);
       this.onPacketListeners = this.onPacketListeners.filter((l) => l !== cb);
     };
   }
@@ -58,6 +89,9 @@ class EspHardwareManager {
 
   private notifyStatus(connected: boolean, message: string) {
     this.isConnected = connected;
+    if (connected) {
+      this.recalibrateBaselines();
+    }
     this.onStatusListeners.forEach((cb) => cb(connected, message));
   }
 
@@ -87,8 +121,9 @@ class EspHardwareManager {
           return null;
         }
 
-        const bacVal = Number(obj.bac ?? obj.alcohol ?? obj.alc ?? obj.b ?? 0);
-        const gasVal =
+        const rawMq3Val = obj.adc ?? obj.rawAdc;
+        let bacVal = Number(obj.bac ?? obj.alcohol ?? obj.alc ?? obj.b ?? 0);
+        let gasVal =
           obj.gas !== undefined
             ? Number(obj.gas)
             : obj.gasPpm !== undefined
@@ -138,14 +173,53 @@ class EspHardwareManager {
             ? Boolean(Number(obj.f))
             : undefined;
 
-        // Auto-detect IR flame shift on fadc even if firmware threshold (<800) wasn't reached yet
+        // STARTUP AUTO-CALIBRATION FOR ALL SENSORS (Averages initial startup packets for baseline)
+        if (this.isCalibrating) {
+          if (rawMq3Val !== undefined && !isNaN(Number(rawMq3Val))) {
+            this.calSamples.mq3.push(Number(rawMq3Val));
+          }
+          if (rawGasVal !== undefined && !isNaN(Number(rawGasVal))) {
+            this.calSamples.mq9.push(Number(rawGasVal));
+          }
+          if (flameRawVal !== undefined && !isNaN(Number(flameRawVal))) {
+            this.calSamples.flame.push(Number(flameRawVal));
+          }
+
+          const avg = (arr: number[]) =>
+            arr.length > 0 ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
+
+          this.mq3BaselineAdc = avg(this.calSamples.mq3) ?? this.mq3BaselineAdc;
+          this.mq9BaselineAdc = avg(this.calSamples.mq9) ?? this.mq9BaselineAdc;
+          this.flameBaselineAdc = avg(this.calSamples.flame) ?? this.flameBaselineAdc;
+
+          if (
+            this.calSamples.flame.length >= 5 ||
+            this.calSamples.mq3.length >= 5 ||
+            this.calSamples.mq9.length >= 5
+          ) {
+            this.isCalibrating = false;
+          }
+        }
+
+        // Apply calibrated baseline to MQ-3 Alcohol
+        if (rawMq3Val !== undefined && this.mq3BaselineAdc !== null) {
+          const mq3Delta = Math.max(0, Number(rawMq3Val) - this.mq3BaselineAdc);
+          bacVal = mq3Delta <= 100 ? 0.0 : Number(((mq3Delta - 100) * 0.00012).toFixed(3));
+        }
+
+        // Apply calibrated baseline to MQ-9 Gas
+        if (rawGasVal !== undefined && this.mq9BaselineAdc !== null) {
+          const mq9Delta = Math.max(0, Number(rawGasVal) - this.mq9BaselineAdc);
+          gasVal = mq9Delta <= 80 ? 18.0 : Number((18.0 + (mq9Delta - 80) * 0.12).toFixed(1));
+        }
+
+        // Apply calibrated baseline to 1 IR LED / KY-026 Flame Sensor (triggers on >= 120 ADC delta from baseline!)
         if (flameRawVal !== undefined && !isNaN(flameRawVal)) {
-          if (this.flameBaselineAdc === null && !flameVal) {
+          if (this.flameBaselineAdc === null) {
             this.flameBaselineAdc = flameRawVal;
-          } else if (this.flameBaselineAdc !== null && !flameVal) {
+          } else if (!this.isCalibrating && !flameVal) {
             const adcDelta = Math.abs(flameRawVal - this.flameBaselineAdc);
-            const droppedFromHigh = this.flameBaselineAdc > 3000 && flameRawVal < 2800;
-            if (adcDelta >= 450 || droppedFromHigh || flameRawVal < 1200) {
+            if (adcDelta >= 120) {
               flameVal = true;
             }
           }
@@ -154,7 +228,7 @@ class EspHardwareManager {
         return {
           dock: true,
           bac: isNaN(bacVal) ? 0 : bacVal,
-          rawAdc: obj.adc ?? obj.rawAdc ?? (bacVal > 0 ? 1200 : 180),
+          rawAdc: rawMq3Val !== undefined ? Number(rawMq3Val) : bacVal > 0 ? 1200 : 180,
           gasPpm: gasVal !== undefined && !isNaN(gasVal) ? Math.max(0, gasVal) : undefined,
           rawGasAdc: rawGasVal,
           knock: knockVal,
@@ -810,6 +884,8 @@ bool relayState = true;
 
 int knockBaseline = HIGH;
 int flameDigBaseline = HIGH;
+int mq3Baseline = 180;
+int mq9Baseline = 220;
 int flameAdcBaseline = 3950;
 volatile int knockCount = 0;
 volatile bool knockInstantFlag = false;
@@ -818,6 +894,25 @@ volatile unsigned long lastKnockIsrUs = 0;
 unsigned long knockHoldUntilMs = 0;
 unsigned long flameHoldUntilMs = 0;
 unsigned long lastTelemetryMs = 0;
+
+// Startup Auto-Calibration: Samples all sensors 16 times over ~400ms to lock ambient baselines!
+// Works with a single 2-pin IR LED (on GPIO 6) OR a KY-026 module, plus MQ-3, MQ-9, and Knock!
+void calibrateAllSensorsBaseline() {
+  long sumMq3 = 0;
+  long sumMq9 = 0;
+  long sumFlame = 0;
+  for (int i = 0; i < 16; i++) {
+    sumMq3 += analogRead(MQ3_PIN);
+    sumMq9 += analogRead(MQ9_PIN);
+    sumFlame += analogRead(FLAME_ADC_PIN);
+    delay(25);
+  }
+  mq3Baseline = sumMq3 / 16;
+  mq9Baseline = sumMq9 / 16;
+  flameAdcBaseline = sumFlame / 16;
+  knockBaseline = digitalRead(KNOCK_PIN);
+  flameDigBaseline = digitalRead(FLAME_DIG_PIN);
+}
 
 // Catches BOTH active-LOW (KY-031) and active-HIGH (SW-420) microsecond tap pulses!
 void IRAM_ATTR onKnockPulse() {
@@ -879,6 +974,8 @@ class MyRxCallbacks: public BLECharacteristicCallbacks {
     } else if (cmd.indexOf("RELAY:0") >= 0) {
       relayState = false;
       digitalWrite(RELAY_PIN, LOW);
+    } else if (cmd.indexOf("CAL") >= 0) {
+      calibrateAllSensorsBaseline();
     }
   }
 };
@@ -910,13 +1007,13 @@ void setup() {
 
   pinMode(KNOCK_PIN, INPUT_PULLUP);
   pinMode(FLAME_DIG_PIN, INPUT_PULLUP);
+  // Enable weak pullup on GPIO 6 so a bare 2-pin IR LED (connected between GPIO 6 and GND) works without an external resistor!
+  pinMode(FLAME_ADC_PIN, INPUT_PULLUP);
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
 
-  delay(80);
-  knockBaseline = digitalRead(KNOCK_PIN);
-  flameDigBaseline = digitalRead(FLAME_DIG_PIN);
-  flameAdcBaseline = analogRead(FLAME_ADC_PIN);
+  // Calibrate ALL sensors baseline at startup
+  calibrateAllSensorsBaseline();
 
   // Trigger on CHANGE so both active-LOW and active-HIGH sensors work automatically!
   attachInterrupt(digitalPinToInterrupt(KNOCK_PIN), onKnockPulse, CHANGE);
@@ -966,6 +1063,8 @@ void loop() {
     } else if (cmd.indexOf("RELAY:0") >= 0) {
       relayState = false;
       digitalWrite(RELAY_PIN, LOW);
+    } else if (cmd.indexOf("CAL") >= 0) {
+      calibrateAllSensorsBaseline();
     }
   }
 
@@ -1007,13 +1106,15 @@ void loop() {
     lastTelemetryMs = millis();
 
     rawAdc = analogRead(MQ3_PIN);
-    bac = (rawAdc < 350) ? 0.00 : (rawAdc - 350) * 0.00012;
+    int mq3Delta = max(0, rawAdc - mq3Baseline);
+    bac = (mq3Delta <= 100) ? 0.00 : (mq3Delta - 100) * 0.00012;
 
     currentKnock = (millis() < knockHoldUntilMs);
 
     flameRawAdc = analogRead(FLAME_ADC_PIN);
     bool digTriggered = (digitalRead(FLAME_DIG_PIN) != flameDigBaseline);
-    bool adcTriggered = (abs(flameRawAdc - flameAdcBaseline) > 450) || (flameAdcBaseline > 2500 && flameRawAdc < 2600) || (flameRawAdc < 1200);
+    // Sensitive 120 ADC delta from calibrated baseline detects both a single 2-pin IR LED and KY-026!
+    bool adcTriggered = (abs(flameRawAdc - flameAdcBaseline) >= 120);
     if (digTriggered || adcTriggered) {
       flameHoldUntilMs = millis() + 2500;
     }
@@ -1025,7 +1126,8 @@ void loop() {
     }
 
     rawGasAdc = analogRead(MQ9_PIN);
-    gasPpm = (rawGasAdc < 200) ? 18.0 : (18.0 + (rawGasAdc - 200) * 0.12);
+    int mq9Delta = max(0, rawGasAdc - mq9Baseline);
+    gasPpm = (mq9Delta <= 80) ? 18.0 : (18.0 + (mq9Delta - 80) * 0.12);
 
     String payload = buildTelemetryJson();
     Serial.println(payload);

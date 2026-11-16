@@ -169,6 +169,22 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
 
           <button
             type="button"
+            onClick={() => {
+              espManager.recalibrateBaselines();
+              onResetKnocks();
+              onResetFlame();
+              setUsbStatusMsg('All sensors re-calibrated to current room baseline!');
+              setTimeout(() => setUsbStatusMsg(null), 2500);
+            }}
+            className="px-3 py-1.5 rounded bg-[#10b981]/20 hover:bg-[#10b981]/30 text-[#10b981] border border-[#10b981]/60 font-headline font-bold text-xs flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+            title="Zero all sensors (1 IR LED, MQ-3 Alcohol, MQ-9 Gas, Knock/Tap) to current ambient baseline"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>CALIBRATE BASELINE</span>
+          </button>
+
+          <button
+            type="button"
             onClick={onOpenEspModal}
             className="px-3 py-1.5 rounded bg-[#1c2b3c] hover:bg-[#273647] text-[#ffc174] border border-[#f59e0b]/50 font-headline font-bold text-xs flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
           >
@@ -590,10 +606,10 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                 </div>
                 <div>
                   <span className="text-xs font-headline font-bold text-white block uppercase">
-                    3. Flame Sensor (KY-026 IR)
+                    3. 1 IR LED / Flame Sensor (KY-026)
                   </span>
                   <span className="text-[10px] font-mono text-[#94a3b8] block">
-                    ESP32-S3 GPIO 14 &amp; GPIO 6 · ESP32 GPIO 26
+                    ESP32-S3 GPIO 6 (1 IR LED / AO) &amp; GPIO 14 (DO)
                   </span>
                 </div>
               </div>
@@ -604,7 +620,7 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                     : 'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]'
                 }`}
               >
-                {sensors.flameDetected ? 'FIRE EMERGENCY' : 'NO FLAME'}
+                {sensors.flameDetected ? 'FIRE EMERGENCY' : 'BASELINE CALIBRATED'}
               </span>
             </div>
 
@@ -612,7 +628,7 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
             <div className="my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] flex items-baseline justify-between">
               <div>
                 <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">
-                  ENGINE / CABIN IR SPECTRUM
+                  1 IR LED / CABIN IR SPECTRUM
                 </span>
                 <span
                   className={`text-xl font-mono font-extrabold uppercase ${
@@ -623,8 +639,8 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                 </span>
               </div>
               <div className="text-right font-mono">
-                <span className="text-[10px] text-[#94a3b8] block">
-                  IR ADC: {sensors.flameRawAdc}
+                <span className="text-[10px] text-[#ffc174] block">
+                  IR ADC: {sensors.flameRawAdc} (BASE: {espManager.flameBaselineAdc ?? sensors.flameRawAdc})
                 </span>
                 <span
                   className={`text-[10px] font-bold block ${

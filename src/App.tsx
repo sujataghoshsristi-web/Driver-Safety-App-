@@ -274,14 +274,6 @@ export default function App() {
     });
   };
 
-  // Subscribe to real physical accelerometer collision shocks (> 3.0G)
-  useEffect(() => {
-    const unsubCrash = phoneSensors.onCrashDetected((impactG) => {
-      handleCrashDetected(impactG);
-    });
-    return () => unsubCrash();
-  }, []);
-
   const knockLatchUntilRef = useRef<number>(0);
   const lastLoggedKnockCountRef = useRef<number>(0);
   const recentTapTimesRef = useRef<number[]>([]);
@@ -289,7 +281,24 @@ export default function App() {
   const flameBaselineAdcRef = useRef<number | null>(null);
   const lastCrashCallMsRef = useRef<number>(0);
 
-  // Subscribe to real-time ESP32 & NodeMCU sensor packets (MQ-3 Alcohol, KY-031 Knock/Tap, KY-026 Flame, MQ-9 Gas)
+  // Subscribe to real physical accelerometer collision shocks (> 3.0G) & run Startup All-Sensor Baseline Calibration
+  useEffect(() => {
+    phoneSensors.recalibrateBaseline();
+    espManager.recalibrateBaselines();
+    logEvent(
+      'Startup Auto-Calibration: All Sensors Zeroed to Baseline',
+      'info',
+      'CAL-BASELINE',
+      'All hardware & cab sensors (1 IR LED / Flame, MQ-3 Alcohol, MQ-9 Gas, KY-031 Knock, 3-Axis IMU & Tilt) calibrated to ambient baseline.'
+    );
+
+    const unsubCrash = phoneSensors.onCrashDetected((impactG) => {
+      handleCrashDetected(impactG);
+    });
+    return () => unsubCrash();
+  }, []);
+
+  // Subscribe to real-time ESP32 & NodeMCU sensor packets (MQ-3 Alcohol, KY-031 Knock/Tap, KY-026 / 1 IR LED Flame, MQ-9 Gas)
   useEffect(() => {
     const unsubPacket = espManager.subscribePacket((packet: EspSensorPacket, rawLine: string) => {
       setTelemetry((prev) => {
@@ -359,26 +368,23 @@ export default function App() {
           hwSensors.knockDetected = false;
         }
 
-        // 3. Process KY-026 IR Flame Sensor (Digital + Analog Baseline Shift Detection)
+        // 3. Process 1 IR LED / KY-026 Flame Sensor (Startup Baseline Calibration + 120 ADC Delta Detection)
         if (packet.flameRawAdc !== undefined && !isNaN(packet.flameRawAdc)) {
           hwSensors.flameRawAdc = packet.flameRawAdc;
-          if (flameBaselineAdcRef.current === null && !packet.flame && packet.flameRawAdc > 1500) {
+          if (espManager.flameBaselineAdc !== null) {
+            flameBaselineAdcRef.current = espManager.flameBaselineAdc;
+          } else if (flameBaselineAdcRef.current === null && !packet.flame) {
             flameBaselineAdcRef.current = packet.flameRawAdc;
           }
         }
 
         const flameAdcShift =
+          !espManager.isCalibrating &&
           packet.flameRawAdc !== undefined &&
           flameBaselineAdcRef.current !== null &&
-          Math.abs(packet.flameRawAdc - flameBaselineAdcRef.current) >= 400;
-        const flameAdcLow =
-          packet.flameRawAdc !== undefined &&
-          ((flameBaselineAdcRef.current !== null &&
-            flameBaselineAdcRef.current > 2800 &&
-            packet.flameRawAdc < 2800) ||
-            packet.flameRawAdc < 1200);
+          Math.abs(packet.flameRawAdc - flameBaselineAdcRef.current) >= 120;
 
-        const isFlameTriggeredNow = Boolean(packet.flame) || flameAdcShift || flameAdcLow;
+        const isFlameTriggeredNow = Boolean(packet.flame) || flameAdcShift;
 
         if (isFlameTriggeredNow) {
           flameLatchUntilRef.current = nowMs + 4500;
