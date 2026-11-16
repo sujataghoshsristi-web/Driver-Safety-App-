@@ -40,6 +40,7 @@ import { GasSafetyCard } from './components/GasSafetyCard';
 import { PhoneSensorsCard } from './components/PhoneSensorsCard';
 import { HardwareSensorsSuiteCard } from './components/HardwareSensorsSuiteCard';
 import { CrashEmergencyModal } from './components/CrashEmergencyModal';
+import { LaptopControlRoomView } from './components/LaptopControlRoomView';
 import { phoneSensors, INITIAL_PHONE_SENSORS_STATE } from './utils/phoneSensorsManager';
 import { EMERGENCY_PHONE_NUMBER, callEmergencyNumber, emergencyCallManager } from './utils/emergencyDialer';
 import { FLEET_VEHICLES } from './data/fleetVehicles';
@@ -180,6 +181,15 @@ export default function App() {
   const [isAudioMuted, setIsAudioMuted] = useState<boolean>(false);
   const [isCruiseActive, setIsCruiseActive] = useState<boolean>(false);
   const [activeDtc, setActiveDtc] = useState<{ code: string; desc: string } | null>(null);
+  const [isLaptopControlRoom, setIsLaptopControlRoom] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const isMobileOrApk =
+      /Android|iPhone|iPad|iPod|Mobile/i.test(ua) ||
+      window.location.protocol === 'capacitor:' ||
+      window.innerWidth < 768;
+    return !isMobileOrApk;
+  });
 
   // Sync authenticated driver info into vehicle telemetry
   useEffect(() => {
@@ -235,6 +245,14 @@ export default function App() {
           },
         };
       });
+      if (sensorState.gps.latitude || sensorState.gps.longitude) {
+        emergencyCallManager.updateCallerLiveLocation({
+          latitude: sensorState.gps.latitude,
+          longitude: sensorState.gps.longitude,
+          accuracy: sensorState.gps.accuracyM ?? undefined,
+          speedKmh: sensorState.gps.speedKmh ?? undefined,
+        });
+      }
     });
 
     return () => unsubSensors();
@@ -1396,6 +1414,24 @@ export default function App() {
     return <DriverLoginScreen />;
   }
 
+  // Laptop UI = Dedicated Control Room UI (Live Phone GPS Map + Two-Way Voice Call Receiver)
+  // Phone UI = Full In-Cab Docker UI (Sensors, Speedometer, 4-Knock Wake, Baseline Calibration, etc.)
+  if (isLaptopControlRoom) {
+    return (
+      <LaptopControlRoomView
+        telemetry={telemetry}
+        isAudioMuted={isAudioMuted}
+        onToggleAudio={handleToggleAudio}
+        onSwitchToPhoneDocker={() => {
+          cabAudio.playKeyClick();
+          setIsLaptopControlRoom(false);
+        }}
+        userProfile={userProfile}
+        onLogout={logout}
+      />
+    );
+  }
+
   return (
     <div className="min-h-[100dvh] bg-[#051424] text-[#d4e4fa] flex flex-col font-body antialiased hud-grid pb-16 sm:pb-0">
       {/* 1. Persistent Top Tier Hardware Telemetry Bar */}
@@ -1411,6 +1447,10 @@ export default function App() {
         onOpenVehicleSelector={() => setIsVehicleSelectorOpen(true)}
         onOpenGasRemediation={() => setIsGasRemediationOpen(true)}
         onResetSimulation={handleResetSimulation}
+        onOpenControlRoom={() => {
+          cabAudio.playKeyClick();
+          setIsLaptopControlRoom(true);
+        }}
         userProfile={userProfile}
         onLogout={logout}
       />

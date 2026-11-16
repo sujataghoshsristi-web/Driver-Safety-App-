@@ -15,7 +15,8 @@ import {
   LogOut,
   Settings,
   Check,
-  X
+  X,
+  Laptop
 } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
@@ -40,6 +41,7 @@ interface PersistentHardwareBarProps {
   onOpenGasRemediation?: () => void;
   onResetSimulation: () => void;
   onTriggerInstantCall?: () => void;
+  onOpenControlRoom?: () => void;
   userProfile?: FleetUserProfile | null;
   onLogout?: () => void;
 }
@@ -55,6 +57,7 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
   onOpenGasRemediation,
   onResetSimulation,
   onTriggerInstantCall,
+  onOpenControlRoom,
   userProfile,
   onLogout,
 }) => {
@@ -160,6 +163,18 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
               <Settings className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
               <span>SET #</span>
             </button>
+
+            {onOpenControlRoom && (
+              <button
+                type="button"
+                onClick={onOpenControlRoom}
+                className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-[#162a40] hover:bg-[#1e3854] text-[#38bdf8] border border-[#38bdf8]/50 font-headline font-bold text-xs hidden sm:flex items-center gap-1.5 cursor-pointer"
+                title="Switch to Laptop Control Room UI"
+              >
+                <Laptop className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
+                <span>CONTROL ROOM UI</span>
+              </button>
+            )}
 
             {/* Audio Mute */}
             <button

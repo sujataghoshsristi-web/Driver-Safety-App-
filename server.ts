@@ -107,19 +107,57 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '5mb' }));
+
+  // Allow cross-IP, Wi-Fi LAN, and Capacitor Android APK requests to reach this server
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
 
   // ============================================================================
-  // REAL TWO-WAY WEBRTC VOICE CALL SIGNALING SERVER (Driver <-> Other Person)
+  // REAL TWO-WAY VOICE CALL + LIVE PHONE GPS LOCATION SERVER (Phone <-> Laptop over 2 IPs)
   // ============================================================================
+  interface AudioChunkPacket {
+    seq: number;
+    role: 'caller' | 'callee';
+    mimeType: string;
+    base64: string;
+    timestamp: number;
+  }
+
+  interface LiveLocationPayload {
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    speedKmh?: number;
+    heading?: number;
+    impactG?: number;
+    knockCount?: number;
+    unitNumber?: string;
+    driverId?: string;
+    reason?: string;
+    updatedAt: number;
+  }
+
   interface WebRtcRoom {
     roomId: string;
     status: 'ringing' | 'connected' | 'ended';
     callerContext?: Record<string, any>;
+    liveLocation?: LiveLocationPayload | null;
+    locationTrail: Array<{ lat: number; lon: number; ts: number }>;
     offer: RTCSessionDescriptionInit | null;
     answer: RTCSessionDescriptionInit | null;
     callerCandidates: RTCIceCandidateInit[];
     calleeCandidates: RTCIceCandidateInit[];
+    audioChunks: AudioChunkPacket[];
+    nextAudioSeq: number;
     updatedAt: number;
   }
 
@@ -135,38 +173,67 @@ async function startServer() {
     }
   }, 60_000);
 
-  // GET /api/webrtc/room/:roomId — Poll room state (offer, answer, ICE candidates, status)
+  // GET /api/webrtc/room/:roomId — Poll room state (offer, answer, ICE candidates, live GPS location, status)
   app.get('/api/webrtc/room/:roomId', (req, res) => {
     const roomId = (req.params.roomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
     const room = webrtcRooms.get(roomId);
     if (!room) {
       return res.json({ status: 'idle', roomId });
     }
-    return res.json(room);
+    return res.json({
+      roomId: room.roomId,
+      status: room.status,
+      callerContext: room.callerContext,
+      liveLocation: room.liveLocation,
+      locationTrail: room.locationTrail,
+      offer: room.offer,
+      answer: room.answer,
+      callerCandidates: room.callerCandidates,
+      calleeCandidates: room.calleeCandidates,
+      updatedAt: room.updatedAt,
+    });
   });
 
-  // POST /api/webrtc/offer — Caller (Driver Cab) posts WebRTC SDP Offer to start a real 2-way voice call
+  // POST /api/webrtc/offer — Caller (Phone) posts WebRTC SDP Offer + initial GPS coordinates
   app.post('/api/webrtc/offer', (req, res) => {
     const { roomId: rawRoomId, offer, callerContext } = req.body || {};
     const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
     if (!offer) {
       return res.status(400).json({ error: 'Missing WebRTC offer' });
     }
+    const lat = Number(callerContext?.latitude) || 37.7749;
+    const lon = Number(callerContext?.longitude) || -122.4194;
+    const initialLoc: LiveLocationPayload = {
+      latitude: lat,
+      longitude: lon,
+      accuracy: Number(callerContext?.accuracy) || 12,
+      speedKmh: Number(callerContext?.speedKmh) || 0,
+      impactG: Number(callerContext?.impactG) || 4.2,
+      knockCount: Number(callerContext?.knockCount) || 4,
+      unitNumber: callerContext?.unitNumber || 'AUTO-101',
+      driverId: callerContext?.driverId || 'DRV-8841',
+      reason: callerContext?.reason || 'CRASH',
+      updatedAt: Date.now(),
+    };
     const room: WebRtcRoom = {
       roomId,
       status: 'ringing',
       callerContext: callerContext || {},
+      liveLocation: initialLoc,
+      locationTrail: [{ lat, lon, ts: Date.now() }],
       offer,
       answer: null,
       callerCandidates: [],
       calleeCandidates: [],
+      audioChunks: [],
+      nextAudioSeq: 1,
       updatedAt: Date.now(),
     };
     webrtcRooms.set(roomId, room);
     return res.json({ ok: true, room });
   });
 
-  // POST /api/webrtc/answer — Callee (Other Person / Receiver) posts WebRTC SDP Answer
+  // POST /api/webrtc/answer — Callee (Laptop) posts WebRTC SDP Answer
   app.post('/api/webrtc/answer', (req, res) => {
     const { roomId: rawRoomId, answer } = req.body || {};
     const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
@@ -180,7 +247,7 @@ async function startServer() {
     return res.json({ ok: true, room });
   });
 
-  // POST /api/webrtc/candidate — Exchange ICE candidates between Caller and Callee
+  // POST /api/webrtc/candidate — Exchange ICE candidates between Phone and Laptop
   app.post('/api/webrtc/candidate', (req, res) => {
     const { roomId: rawRoomId, role, candidate } = req.body || {};
     const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
@@ -195,6 +262,106 @@ async function startServer() {
     }
     room.updatedAt = Date.now();
     return res.json({ ok: true });
+  });
+
+  // POST /api/webrtc/location — Phone streams its real-time GPS coordinates to Laptop Control Room over Internet/Wi-Fi
+  app.post('/api/webrtc/location', (req, res) => {
+    const {
+      roomId: rawRoomId,
+      latitude,
+      longitude,
+      accuracy,
+      speedKmh,
+      heading,
+      impactG,
+      knockCount,
+      unitNumber,
+      driverId,
+      reason,
+    } = req.body || {};
+    const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    let room = webrtcRooms.get(roomId);
+    const lat = Number(latitude);
+    const lon = Number(longitude);
+    if (!room) {
+      room = {
+        roomId,
+        status: 'ended',
+        callerContext: {},
+        liveLocation: null,
+        locationTrail: [],
+        offer: null,
+        answer: null,
+        callerCandidates: [],
+        calleeCandidates: [],
+        audioChunks: [],
+        nextAudioSeq: 1,
+        updatedAt: Date.now(),
+      };
+      webrtcRooms.set(roomId, room);
+    }
+    if (!isNaN(lat) && !isNaN(lon) && (lat !== 0 || lon !== 0)) {
+      room.liveLocation = {
+        latitude: lat,
+        longitude: lon,
+        accuracy: accuracy !== undefined ? Number(accuracy) : room.liveLocation?.accuracy,
+        speedKmh: speedKmh !== undefined ? Number(speedKmh) : room.liveLocation?.speedKmh,
+        heading: heading !== undefined ? Number(heading) : room.liveLocation?.heading,
+        impactG: impactG !== undefined ? Number(impactG) : room.liveLocation?.impactG,
+        knockCount: knockCount !== undefined ? Number(knockCount) : room.liveLocation?.knockCount,
+        unitNumber: unitNumber || room.liveLocation?.unitNumber || 'AUTO-101',
+        driverId: driverId || room.liveLocation?.driverId || 'DRV-8841',
+        reason: reason || room.liveLocation?.reason || 'LIVE-GPS',
+        updatedAt: Date.now(),
+      };
+      const lastPt = room.locationTrail[room.locationTrail.length - 1];
+      if (!lastPt || Math.abs(lastPt.lat - lat) > 0.00002 || Math.abs(lastPt.lon - lon) > 0.00002) {
+        room.locationTrail.push({ lat, lon, ts: Date.now() });
+        if (room.locationTrail.length > 40) {
+          room.locationTrail.shift();
+        }
+      }
+      room.updatedAt = Date.now();
+    }
+    return res.json({ ok: true, liveLocation: room.liveLocation });
+  });
+
+  // POST /api/webrtc/audio — Server-side live voice audio relay fallback across 2 IPs when NAT blocks UDP
+  app.post('/api/webrtc/audio', (req, res) => {
+    const { roomId: rawRoomId, role, mimeType, base64 } = req.body || {};
+    const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    const room = webrtcRooms.get(roomId);
+    if (!room || !base64) {
+      return res.status(404).json({ error: 'Room or audio data missing' });
+    }
+    room.audioChunks.push({
+      seq: room.nextAudioSeq++,
+      role: role === 'callee' ? 'callee' : 'caller',
+      mimeType: mimeType || 'audio/webm',
+      base64,
+      timestamp: Date.now(),
+    });
+    if (room.audioChunks.length > 16) {
+      room.audioChunks.splice(0, room.audioChunks.length - 16);
+    }
+    room.updatedAt = Date.now();
+    return res.json({ ok: true });
+  });
+
+  // GET /api/webrtc/audio/:roomId/:listenRole — Fetch new audio chunks from the other side
+  app.get('/api/webrtc/audio/:roomId/:listenRole', (req, res) => {
+    const roomId = (req.params.roomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    const listenRole = req.params.listenRole === 'callee' ? 'callee' : 'caller';
+    const afterSeq = Number(req.query.after || 0);
+    const room = webrtcRooms.get(roomId);
+    if (!room) {
+      return res.json({ chunks: [] });
+    }
+    const targetSenderRole = listenRole === 'caller' ? 'callee' : 'caller';
+    const chunks = room.audioChunks.filter(
+      (c) => c.role === targetSenderRole && c.seq > afterSeq
+    );
+    return res.json({ chunks });
   });
 
   // POST /api/webrtc/hangup — End the active call in a room
