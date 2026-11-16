@@ -127,7 +127,7 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
               </span>
             </div>
             <p className="text-[11px] font-mono text-[#94a3b8]">
-              ESP32-S3 PINOUT: MQ-3 Alcohol (GPIO 4) · Knock/Tap (GPIO 13) · Flame (GPIO 14 &amp; GPIO 6) · MQ-9 Gas (GPIO 5)
+              ESP32-S3 PINOUT: MQ-3 Alcohol (GPIO 4) · 3-Pin Knock/Tap (GPIO 13) · 3-Pin IR Sensor OUT (GPIO 14) · MQ-9 Gas (GPIO 5)
             </p>
           </div>
         </div>
@@ -258,10 +258,11 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
       {(() => {
         const isCrashHappened =
           sensors.lastKnockType === 'crash_impact' ||
+          sensors.knockCount >= 4 ||
           sensors.flameDetected ||
           (sensors.knockDetected && isAlcoholViolated);
         const activeCount =
-          (sensors.knockDetected ? 1 : 0) +
+          (sensors.knockCount > 0 ? 1 : 0) +
           (sensors.flameDetected ? 1 : 0) +
           (isAlcoholViolated ? 1 : 0);
 
@@ -270,7 +271,7 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
             className={`mb-3 p-3 rounded-lg border-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all ${
               isCrashHappened
                 ? 'bg-[#3b0a14] border-[#ef4444] shadow-[0_0_25px_rgba(239,68,68,0.45)]'
-                : sensors.knockDetected || isAlcoholViolated
+                : sensors.knockCount > 0 || isAlcoholViolated
                 ? 'bg-[#2e200a] border-[#f59e0b]'
                 : 'bg-[#091929] border-[#1e3a5f]'
             }`}
@@ -280,7 +281,7 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                 className={`w-8 h-8 rounded flex items-center justify-center shrink-0 font-bold ${
                   isCrashHappened
                     ? 'bg-[#ef4444] text-white animate-bounce'
-                    : sensors.knockDetected || isAlcoholViolated
+                    : sensors.knockCount > 0 || isAlcoholViolated
                     ? 'bg-[#f59e0b] text-[#051424]'
                     : 'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/50'
                 }`}
@@ -296,26 +297,26 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                     className={`text-xs font-mono font-extrabold px-2 py-0.5 rounded uppercase ${
                       isCrashHappened
                         ? 'bg-[#ef4444] text-white animate-pulse'
-                        : sensors.knockDetected
+                        : sensors.knockCount > 0
                         ? 'bg-[#f59e0b] text-[#051424]'
                         : 'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]'
                     }`}
                   >
                     {isCrashHappened
-                      ? '🚨 CRASH DETECTED (EMERGENCY CALLING)'
-                      : sensors.knockDetected
-                      ? '⚠️ CHASSIS TAP DETECTED (TAP AGAIN OR +SENSOR = CRASH)'
+                      ? '🚨 4/4 KNOCK / CRASH WAKE (REAL CALL ACTIVE)'
+                      : sensors.knockCount > 0
+                      ? `⚠️ KNOCK ${sensors.knockCount}/4 (KNOCK ${Math.max(0, 4 - sensors.knockCount)} MORE TIME(S) TO WAKE CALL)`
                       : '✅ NO CRASH (ALL SENSORS SAFE)'}
                   </span>
                 </div>
                 <p className="text-[11px] font-mono text-[#94a3b8] mt-0.5">
                   ACTIVE SENSORS ({activeCount}/3):{' '}
-                  <span className={sensors.knockDetected ? 'text-[#f59e0b] font-bold' : 'text-[#10b981]'}>
-                    [Knock/Tap: {sensors.knockDetected ? 'TRIGGERED' : 'CLEAR'}]
+                  <span className={sensors.knockCount > 0 ? 'text-[#f59e0b] font-bold' : 'text-[#10b981]'}>
+                    [Knock/Tap: {sensors.knockCount}/4 (Wakes at 4)]
                   </span>{' '}
                   ·{' '}
                   <span className={sensors.flameDetected ? 'text-[#ef4444] font-bold' : 'text-[#10b981]'}>
-                    [Fire/Flame: {sensors.flameDetected ? 'FIRE!' : `SAFE (${sensors.flameRawAdc} ADC)`}]
+                    [3-Pin IR: {sensors.flameDetected ? '0 (LOW — FIRE!)' : '1 (HIGH — SAFE)'}]
                   </span>{' '}
                   ·{' '}
                   <span className={isAlcoholViolated ? 'text-[#ef4444] font-bold' : 'text-[#10b981]'}>
@@ -501,41 +502,72 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
               </span>
             </div>
 
-            {/* Knock Counter & State */}
-            <div className="my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] flex items-baseline justify-between">
-              <div>
-                <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">
-                  KNOCK / TAP PULSES
-                </span>
-                <span
-                  className={`text-2xl font-mono font-extrabold tabular-nums ${
-                    sensors.knockDetected ? 'text-[#f59e0b]' : 'text-white'
-                  }`}
-                >
-                  {sensors.knockCount}{' '}
-                  <span className="text-xs font-normal text-[#94a3b8]">TAPS</span>
-                </span>
+            {/* Knock Counter & 4-Tap Wake State */}
+            <div className="my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] space-y-2">
+              <div className="flex items-baseline justify-between">
+                <div>
+                  <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">
+                    4-KNOCK WAKE COUNTER (WAKES AT 4)
+                  </span>
+                  <span
+                    className={`text-2xl font-mono font-extrabold tabular-nums ${
+                      sensors.knockCount >= 4
+                        ? 'text-[#ef4444]'
+                        : sensors.knockCount > 0
+                        ? 'text-[#f59e0b]'
+                        : 'text-white'
+                    }`}
+                  >
+                    {sensors.knockCount} / 4{' '}
+                    <span className="text-xs font-normal text-[#94a3b8]">KNOCKS</span>
+                  </span>
+                </div>
+                <div className="text-right font-mono">
+                  <span
+                    className={`text-[10px] font-bold block uppercase ${
+                      sensors.knockCount >= 4
+                        ? 'text-[#ef4444]'
+                        : sensors.knockCount > 0
+                        ? 'text-[#f59e0b]'
+                        : 'text-[#38bdf8]'
+                    }`}
+                  >
+                    {sensors.knockCount >= 4
+                      ? '🚨 4/4 WAKE — CALLING!'
+                      : sensors.knockCount > 0
+                      ? `⚡ ${4 - sensors.knockCount} MORE TO CALL`
+                      : 'IDLE (0/4 KNOCKS)'}
+                  </span>
+                  <span className="text-[10px] text-[#94a3b8] block">
+                    {sensors.lastKnockTimestamp || 'KNOCK 4X TO CALL'}
+                  </span>
+                </div>
               </div>
-              <div className="text-right font-mono">
-                <span
-                  className={`text-[10px] font-bold block uppercase ${
-                    sensors.knockDetected ? 'text-[#f59e0b]' : 'text-[#38bdf8]'
-                  }`}
-                >
-                  {sensors.knockDetected
-                    ? '⚡ PULSE ACTIVE'
-                    : `LAST: ${sensors.lastKnockType === 'none' ? 'NONE' : sensors.lastKnockType.toUpperCase()}`}
-                </span>
-                <span className="text-[10px] text-[#94a3b8] block">
-                  {sensors.lastKnockTimestamp || 'READY FOR TAP'}
-                </span>
+
+              {/* 4-Step Visual Progress Bar */}
+              <div className="grid grid-cols-4 gap-1.5">
+                {[1, 2, 3, 4].map((step) => {
+                  const filled = sensors.knockCount >= step;
+                  return (
+                    <div
+                      key={step}
+                      className={`h-2 rounded transition-all ${
+                        filled
+                          ? step === 4
+                            ? 'bg-[#ef4444] shadow-[0_0_8px_rgba(239,68,68,0.8)]'
+                            : 'bg-[#f59e0b]'
+                          : 'bg-[#161b22] border border-[#30363d]'
+                      }`}
+                    />
+                  );
+                })}
               </div>
             </div>
 
             {/* Sensitivity Selector */}
             <div className="mb-3 bg-[#161b22] p-2 rounded border border-[#30363d] flex items-center justify-between">
               <span className="text-[10px] font-mono text-[#94a3b8]">
-                TAP MODE ({sensors.knockSensitivity === 'high' ? 'CALLS SOS' : 'COUNTS TAPS'}):
+                WAKE RULE: 4 KNOCKS &rarr; REAL CALL
               </span>
               <div className="flex items-center gap-1">
                 {(['low', 'medium', 'high'] as const).map((lvl) => (
@@ -606,10 +638,10 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                 </div>
                 <div>
                   <span className="text-xs font-headline font-bold text-white block uppercase">
-                    3. 1 IR LED / Flame Sensor (KY-026)
+                    3. 3-Pin IR / Flame Sensor
                   </span>
                   <span className="text-[10px] font-mono text-[#94a3b8] block">
-                    ESP32-S3 GPIO 6 (1 IR LED / AO) &amp; GPIO 14 (DO)
+                    3-Pin (VCC · GND · OUT) &rarr; ESP32-S3 GPIO 14
                   </span>
                 </div>
               </div>
@@ -620,27 +652,27 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
                     : 'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]'
                 }`}
               >
-                {sensors.flameDetected ? 'FIRE EMERGENCY' : 'BASELINE CALIBRATED'}
+                {sensors.flameDetected ? 'IR / FIRE DETECTED' : 'CLEAR (IDLE)'}
               </span>
             </div>
 
-            {/* Live Flame IR Status */}
+            {/* Live 3-Pin IR Digital Status */}
             <div className="my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] flex items-baseline justify-between">
               <div>
                 <span className="text-[10px] font-mono text-[#94a3b8] uppercase block">
-                  1 IR LED / CABIN IR SPECTRUM
+                  3-PIN IR SENSOR DIGITAL OUTPUT
                 </span>
                 <span
                   className={`text-xl font-mono font-extrabold uppercase ${
                     sensors.flameDetected ? 'text-[#ef4444]' : 'text-[#10b981]'
                   }`}
                 >
-                  {sensors.flameDetected ? 'FLAME DETECTED!' : 'SAFE (CLEAR)'}
+                  {sensors.flameDetected ? '0 (LOW — DETECTED!)' : '1 (HIGH — SAFE)'}
                 </span>
               </div>
               <div className="text-right font-mono">
                 <span className="text-[10px] text-[#ffc174] block">
-                  IR ADC: {sensors.flameRawAdc} (BASE: {espManager.flameBaselineAdc ?? sensors.flameRawAdc})
+                  OUT PIN: {sensors.flameDetected ? '0 (ACTIVE LOW)' : '1 (IDLE HIGH)'}
                 </span>
                 <span
                   className={`text-[10px] font-bold block ${

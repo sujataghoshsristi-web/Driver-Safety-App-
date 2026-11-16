@@ -1,5 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AlertOctagon, PhoneCall, XCircle, BellRing, Settings, Check, X, Volume2, Mic, MicOff } from 'lucide-react';
+import {
+  AlertOctagon,
+  PhoneCall,
+  PhoneIncoming,
+  XCircle,
+  BellRing,
+  Settings,
+  Check,
+  X,
+  Mic,
+  MicOff,
+  Radio,
+  Smartphone,
+} from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
 import {
@@ -28,7 +41,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
   const holdIntervalRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
 
-  const HOLD_DURATION_MS = 1200; // 1.2s hold or tap Call Now for instant 0ms connection
+  const HOLD_DURATION_MS = 1200;
 
   useEffect(() => {
     const unsub = emergencyCallManager.subscribe((state) => {
@@ -102,8 +115,45 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
     setIsEditingNumber(false);
   };
 
+  const isCallActive =
+    telemetry.sosActive || callState.status === 'ringing' || callState.status === 'connected';
+
   return (
     <div className="w-full space-y-2">
+      {/* Incoming Call Banner on 2nd Device (Other Person / Emergency Receiver) */}
+      {callState.incomingCallAvailable && callState.status === 'idle' && (
+        <div className="p-3.5 sm:p-4 rounded-xl bg-[#064e3b] border-2 sm:border-4 border-[#10b981] text-white shadow-[0_0_30px_rgba(16,185,129,0.5)] flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-full bg-[#10b981] text-black flex items-center justify-center shrink-0 animate-bounce">
+              <PhoneIncoming className="w-6 h-6" />
+            </div>
+            <div>
+              <span className="font-mono text-[10px] font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase">
+                INCOMING REAL TWO-WAY VOICE CALL ({activePhone})
+              </span>
+              <h3 className="font-headline font-extrabold text-base sm:text-xl mt-0.5">
+                {callState.incomingCallerInfo || `Incoming Emergency Call on Line ${activePhone}`}
+              </h3>
+              <p className="text-xs text-emerald-100">
+                Tap Answer to connect your microphone &amp; speaker so both of you hear each other live!
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              cabAudio.playSuccessChime();
+              emergencyCallManager.answerIncomingCall(activePhone);
+            }}
+            className="w-full sm:w-auto min-h-[48px] px-5 py-2.5 rounded-xl bg-[#10b981] hover:bg-[#34d399] text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-xl cursor-pointer animate-pulse"
+          >
+            <PhoneCall className="w-5 h-5 fill-black" />
+            <span>ANSWER LIVE VOICE CALL ({activePhone})</span>
+          </button>
+        </div>
+      )}
+
       {/* Inline Emergency Number Configurator */}
       {isEditingNumber && (
         <form
@@ -119,7 +169,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
               type="tel"
               value={numberInput}
               onChange={(e) => setNumberInput(e.target.value)}
-              placeholder="e.g. 82199"
+              placeholder="e.g. 82199 or +91..."
               className="flex-1 min-h-[40px] px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#30363d] text-white font-mono text-sm font-bold focus:outline-none focus:border-[#38bdf8]"
             />
             <button
@@ -140,9 +190,9 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
         </form>
       )}
 
-      {telemetry.sosActive || callState.status === 'connected' ? (
-        /* Instant Connected Emergency Call Banner */
-        <div className="p-3.5 sm:p-4 rounded-xl bg-[#93000a] border-2 sm:border-4 border-white text-white shadow-2xl">
+      {isCallActive ? (
+        /* Active Real Two-Way Voice Call Banner */
+        <div className="p-3.5 sm:p-4 rounded-xl bg-[#93000a] border-2 sm:border-4 border-white text-white shadow-2xl space-y-3">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
             <div className="flex items-center gap-3">
               <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-lg bg-[#10b981] text-black flex items-center justify-center font-bold shrink-0">
@@ -151,46 +201,50 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono text-xs font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase">
-                    CONNECTED TO {activePhone} · {formatDuration(callState.durationSeconds)}
+                    {callState.peerConnected
+                      ? `REAL 2-WAY VOICE LIVE (${activePhone}) · ${formatDuration(callState.durationSeconds)}`
+                      : `RINGING ${activePhone} (WAITING FOR OTHER PERSON TO ANSWER)`}
                   </span>
                   <span className="font-mono text-xs text-white">
                     GPS: {telemetry.gps.latitude.toFixed(4)}, {telemetry.gps.longitude.toFixed(4)}
                   </span>
                 </div>
                 <h3 className="font-headline font-bold text-lg sm:text-2xl mt-0.5">
-                  LIVE SPEAKERPHONE CALL ACTIVE ({activePhone})
+                  {callState.peerConnected
+                    ? `TWO-WAY LIVE CALL CONNECTED (${activePhone})`
+                    : `CALLING ${activePhone} — REAL VOICE & SIM DIALER`}
                 </h3>
-                <p className="text-xs font-body text-white/90 line-clamp-2">
-                  {callState.dispatchTranscript ||
-                    `Connected instantly to ${activePhone} on hands-free speakerphone.`}
+                <p className="text-xs font-body text-white/90">
+                  {callState.dispatchTranscript}
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5 w-full sm:w-auto flex-wrap">
+            <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
               <button
                 type="button"
                 onClick={() => {
                   cabAudio.playKeyClick();
                   emergencyCallManager.toggleMute();
                 }}
-                className="flex-1 sm:flex-none h-12 px-4 rounded-lg bg-black/50 hover:bg-black/70 text-white border border-white/40 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-black/50 hover:bg-black/70 text-white border border-white/40 font-headline font-bold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
-                {callState.isMuted ? <MicOff className="w-4 h-4 text-[#ff938c]" /> : <Mic className="w-4 h-4 text-[#10b981]" />}
+                {callState.isMuted ? (
+                  <MicOff className="w-4 h-4 text-[#ff938c]" />
+                ) : (
+                  <Mic className="w-4 h-4 text-[#10b981]" />
+                )}
                 <span>{callState.isMuted ? 'UNMUTE MIC' : 'MIC LIVE'}</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.reannounceDispatch();
-                }}
-                className="flex-1 sm:flex-none h-12 px-4 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shadow-xl cursor-pointer"
+              <a
+                href={`tel:${activePhone}`}
+                onClick={() => emergencyCallManager.dialCellularSimCall(activePhone)}
+                className="flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap shadow-xl cursor-pointer"
               >
-                <Volume2 className="w-4 h-4 text-black" />
-                <span>REPEAT VOICE ({activePhone})</span>
-              </button>
+                <Smartphone className="w-4 h-4 text-black" />
+                <span>DIAL SIM CALL ({activePhone})</span>
+              </a>
 
               <button
                 type="button"
@@ -199,16 +253,51 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                   emergencyCallManager.endCall();
                   onCancelSos();
                 }}
-                className="flex-1 sm:flex-none h-12 px-4 rounded-lg bg-white text-[#93000a] hover:bg-slate-100 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shadow-lg cursor-pointer"
+                className="flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-white text-[#93000a] hover:bg-slate-100 font-headline font-bold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap shadow-lg cursor-pointer"
               >
-                <XCircle className="w-4 h-4 sm:w-5 sm:h-5 text-[#93000a]" />
+                <XCircle className="w-4 h-4 text-[#93000a]" />
                 <span>END CALL</span>
               </button>
             </div>
           </div>
+
+          {/* Two-Way Live Voice Meters (Your Mic + Other Person's Speaker Voice) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-white/20 text-[11px] font-mono">
+            <div className="bg-black/40 p-2 rounded border border-white/15">
+              <div className="flex justify-between mb-1">
+                <span className="text-[#4edea3] flex items-center gap-1">
+                  <Mic className="w-3.5 h-3.5" /> YOUR MIC (SENT TO OTHER PERSON):
+                </span>
+                <span>{callState.isMuted ? 'MUTED' : `${callState.micLevel}%`}</span>
+              </div>
+              <div className="w-full h-2 bg-black/70 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#10b981] transition-all duration-75"
+                  style={{ width: `${callState.isMuted ? 0 : callState.micLevel}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="bg-black/40 p-2 rounded border border-white/15">
+              <div className="flex justify-between mb-1">
+                <span className="text-[#38bdf8] flex items-center gap-1">
+                  <Radio className="w-3.5 h-3.5" /> OTHER PERSON VOICE (SPEAKER):
+                </span>
+                <span>
+                  {callState.peerConnected ? `${callState.remoteVoiceLevel}% LIVE` : 'RINGING...'}
+                </span>
+              </div>
+              <div className="w-full h-2 bg-black/70 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#38bdf8] transition-all duration-75"
+                  style={{ width: `${callState.remoteVoiceLevel}%` }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
-        /* Full-Width SOS Button + Instant 0ms Call Now + Configure Number */
+        /* Full-Width SOS Button + Call Now + Answer Call (2nd Device) + Configure Number */
         <div className="flex flex-col sm:flex-row items-stretch gap-2 w-full">
           <button
             onMouseDown={startHold}
@@ -233,15 +322,15 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                 </span>
                 <span className="block text-[10px] sm:text-[11px] font-mono tracking-normal text-white/90 uppercase mt-0.5 font-normal">
                   {isHolding
-                    ? `CONNECTING INSTANTLY: ${Math.round(holdProgress)}%`
-                    : `HOLD 1.2s OR TAP 'CALL NOW' FOR 0ms INSTANT CALL`}
+                    ? `STARTING REAL CALL: ${Math.round(holdProgress)}%`
+                    : `4 KNOCKS OR HOLD 1.2s TO START REAL TWO-WAY VOICE + SIM CALL`}
                 </span>
               </div>
             </div>
           </button>
 
-          {/* Instant 0ms Call Now & Configure Number buttons */}
-          <div className="flex items-stretch gap-2">
+          {/* Call Now, Answer as Other Person & Configure Number buttons */}
+          <div className="flex items-stretch gap-2 flex-wrap sm:flex-nowrap">
             <button
               type="button"
               onClick={triggerInstantSosCall}
@@ -249,6 +338,19 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
             >
               <PhoneCall className="w-4 h-4 fill-black text-black shrink-0" />
               <span>Call Now ({activePhone})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                cabAudio.playSuccessChime();
+                emergencyCallManager.answerIncomingCall(activePhone);
+              }}
+              className="flex-1 sm:flex-none min-h-[52px] px-3.5 rounded-xl bg-[#0f2942] hover:bg-[#163a5c] text-[#38bdf8] border-2 border-[#38bdf8] font-headline font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+              title="Open this app on a 2nd phone/laptop and tap here to answer the call and talk back!"
+            >
+              <PhoneIncoming className="w-4 h-4 shrink-0" />
+              <span>ANSWER ({activePhone})</span>
             </button>
 
             <button

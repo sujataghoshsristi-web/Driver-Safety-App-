@@ -12338,6 +12338,26 @@ var PhoneCall = createLucideIcon("phone-call", [
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
+var PhoneIncoming = createLucideIcon("phone-incoming", [
+	["path", {
+		d: "M16 2v6h6",
+		key: "1mfrl5"
+	}],
+	["path", {
+		d: "m22 2-6 6",
+		key: "6f0sa0"
+	}],
+	["path", {
+		d: "M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384",
+		key: "9njp5v"
+	}]
+]);
+/**
+* @license lucide-react v0.546.0 - ISC
+*
+* This source code is licensed under the ISC license.
+* See the LICENSE file in the root directory of this source tree.
+*/
 var PhoneOff = createLucideIcon("phone-off", [
 	["path", {
 		d: "M10.1 13.9a14 14 0 0 0 3.732 2.668 1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2 18 18 0 0 1-12.728-5.272",
@@ -13177,11 +13197,11 @@ var EspHardwareManager = class {
 		this.mq3BaselineAdc = null;
 		this.mq9BaselineAdc = null;
 		this.flameBaselineAdc = null;
+		this.knockCountBaseline = null;
 		this.isCalibrating = true;
 		this.calSamples = {
 			mq3: [],
-			mq9: [],
-			flame: []
+			mq9: []
 		};
 		this.isConnected = false;
 		this.connectionType = null;
@@ -13196,12 +13216,12 @@ var EspHardwareManager = class {
 	recalibrateBaselines() {
 		this.mq3BaselineAdc = null;
 		this.mq9BaselineAdc = null;
-		this.flameBaselineAdc = null;
+		this.flameBaselineAdc = 1;
+		this.knockCountBaseline = null;
 		this.isCalibrating = true;
 		this.calSamples = {
 			mq3: [],
-			mq9: [],
-			flame: []
+			mq9: []
 		};
 		this.sendCommand("CAL");
 	}
@@ -13216,7 +13236,6 @@ var EspHardwareManager = class {
 	subscribePacket(cb) {
 		this.onPacketListeners.push(cb);
 		return () => {
-			this.onPacketListeners.filter((l) => l !== cb);
 			this.onPacketListeners = this.onPacketListeners.filter((l) => l !== cb);
 		};
 	}
@@ -13237,9 +13256,9 @@ var EspHardwareManager = class {
 	/**
 	* Parse incoming string packet from ESP32-S3, ESP32, or NodeMCU.
 	* Supports:
-	*  1. JSON strings: {"bac":0.000,"adc":180,"knock":1,"kc":5,"flame":0,"fadc":3950,"gas":20.0,"rly":1}
+	*  1. JSON strings: {"bac":0.000,"adc":180,"knock":1,"kc":5,"flame":0,"fadc":1,"gas":20.0,"rly":1}
 	*  2. Key-Value CSV strings: BAC:0.00,KNOCK:1,FLAME:0,GAS:24
-	*  3. Plain-text Arduino Serial.println() messages: e.g. "Knock detected", "Tap!", "Flame detected", etc.
+	*  3. Plain-text Arduino Serial.println() messages
 	*/
 	parseIncomingLine(line) {
 		const trimmed = line.trim();
@@ -13251,47 +13270,57 @@ var EspHardwareManager = class {
 			const obj = JSON.parse(jsonSlice);
 			if (obj.status && obj.bac === void 0 && obj.knock === void 0) return null;
 			const rawMq3Val = obj.adc ?? obj.rawAdc;
-			let bacVal = Number(obj.bac ?? obj.alcohol ?? obj.alc ?? obj.b ?? 0);
-			let gasVal = obj.gas !== void 0 ? Number(obj.gas) : obj.gasPpm !== void 0 ? Number(obj.gasPpm) : obj.co !== void 0 ? Number(obj.co) : void 0;
 			const rawGasVal = obj.rawGasAdc !== void 0 ? Number(obj.rawGasAdc) : obj.gasAdc !== void 0 ? Number(obj.gasAdc) : obj.gadc !== void 0 ? Number(obj.gadc) : void 0;
-			const knockVal = obj.knock !== void 0 ? Boolean(Number(obj.knock)) : obj.tap !== void 0 ? Boolean(Number(obj.tap)) : obj.k !== void 0 ? Boolean(Number(obj.k)) : void 0;
-			const knockCountVal = obj.knockCount !== void 0 ? Number(obj.knockCount) : obj.kc !== void 0 ? Number(obj.kc) : obj.taps !== void 0 ? Number(obj.taps) : void 0;
-			const flameRawVal = obj.flameAdc !== void 0 ? Number(obj.flameAdc) : obj.flameRawAdc !== void 0 ? Number(obj.flameRawAdc) : obj.fadc !== void 0 ? Number(obj.fadc) : void 0;
-			let flameVal = obj.flame !== void 0 ? Boolean(Number(obj.flame)) : obj.fire !== void 0 ? Boolean(Number(obj.fire)) : obj.f !== void 0 ? Boolean(Number(obj.f)) : void 0;
+			const rawKnockCount = obj.knockCount !== void 0 ? Number(obj.knockCount) : obj.kc !== void 0 ? Number(obj.kc) : obj.taps !== void 0 ? Number(obj.taps) : void 0;
+			if (rawKnockCount !== void 0 && !isNaN(rawKnockCount)) {
+				if (this.knockCountBaseline === null || rawKnockCount < this.knockCountBaseline) this.knockCountBaseline = rawKnockCount;
+			}
+			const calibratedKnockCount = rawKnockCount !== void 0 && this.knockCountBaseline !== null ? Math.max(0, rawKnockCount - this.knockCountBaseline) : rawKnockCount;
 			if (this.isCalibrating) {
 				if (rawMq3Val !== void 0 && !isNaN(Number(rawMq3Val))) this.calSamples.mq3.push(Number(rawMq3Val));
 				if (rawGasVal !== void 0 && !isNaN(Number(rawGasVal))) this.calSamples.mq9.push(Number(rawGasVal));
-				if (flameRawVal !== void 0 && !isNaN(Number(flameRawVal))) this.calSamples.flame.push(Number(flameRawVal));
 				const avg = (arr) => arr.length > 0 ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
-				this.mq3BaselineAdc = avg(this.calSamples.mq3) ?? this.mq3BaselineAdc;
-				this.mq9BaselineAdc = avg(this.calSamples.mq9) ?? this.mq9BaselineAdc;
-				this.flameBaselineAdc = avg(this.calSamples.flame) ?? this.flameBaselineAdc;
-				if (this.calSamples.flame.length >= 5 || this.calSamples.mq3.length >= 5 || this.calSamples.mq9.length >= 5) this.isCalibrating = false;
+				this.mq3BaselineAdc = avg(this.calSamples.mq3) ?? this.mq3BaselineAdc ?? 180;
+				this.mq9BaselineAdc = avg(this.calSamples.mq9) ?? this.mq9BaselineAdc ?? 220;
+				this.flameBaselineAdc = 1;
+				if (this.calSamples.mq3.length >= 4 || this.calSamples.mq9.length >= 4) this.isCalibrating = false;
+				return {
+					dock: true,
+					bac: 0,
+					rawAdc: rawMq3Val !== void 0 ? Number(rawMq3Val) : 180,
+					gasPpm: 18,
+					rawGasAdc: rawGasVal ?? 220,
+					knock: false,
+					knockCount: 0,
+					flame: false,
+					flameRawAdc: 1,
+					relayState: true,
+					timestamp: (/* @__PURE__ */ new Date()).toLocaleTimeString()
+				};
 			}
+			let bacVal = 0;
 			if (rawMq3Val !== void 0 && this.mq3BaselineAdc !== null) {
-				const mq3Delta = Math.max(0, Number(rawMq3Val) - this.mq3BaselineAdc);
-				bacVal = mq3Delta <= 100 ? 0 : Number(((mq3Delta - 100) * 12e-5).toFixed(3));
-			}
+				const mq3Delta = Number(rawMq3Val) - this.mq3BaselineAdc;
+				if (mq3Delta > 850) bacVal = Number(((mq3Delta - 850) * 1e-4).toFixed(3));
+			} else if (obj.bac !== void 0 && Number(obj.bac) > .04) bacVal = Number(obj.bac);
+			let gasVal = 18;
 			if (rawGasVal !== void 0 && this.mq9BaselineAdc !== null) {
-				const mq9Delta = Math.max(0, Number(rawGasVal) - this.mq9BaselineAdc);
-				gasVal = mq9Delta <= 80 ? 18 : Number((18 + (mq9Delta - 80) * .12).toFixed(1));
+				const mq9Delta = Number(rawGasVal) - this.mq9BaselineAdc;
+				if (mq9Delta > 800) gasVal = Number((18 + (mq9Delta - 800) * .1).toFixed(1));
 			}
-			if (flameRawVal !== void 0 && !isNaN(flameRawVal)) {
-				if (this.flameBaselineAdc === null) this.flameBaselineAdc = flameRawVal;
-				else if (!this.isCalibrating && !flameVal) {
-					if (Math.abs(flameRawVal - this.flameBaselineAdc) >= 120) flameVal = true;
-				}
-			}
+			const knockVal = obj.knock !== void 0 ? Boolean(Number(obj.knock)) : obj.tap !== void 0 ? Boolean(Number(obj.tap)) : obj.k !== void 0 ? Boolean(Number(obj.k)) : false;
+			const flameVal = obj.flame !== void 0 ? Boolean(Number(obj.flame)) : obj.fire !== void 0 ? Boolean(Number(obj.fire)) : obj.f !== void 0 ? Boolean(Number(obj.f)) : false;
+			const cleanIrDigitalPin = flameVal ? 0 : 1;
 			return {
 				dock: true,
 				bac: isNaN(bacVal) ? 0 : bacVal,
-				rawAdc: rawMq3Val !== void 0 ? Number(rawMq3Val) : bacVal > 0 ? 1200 : 180,
-				gasPpm: gasVal !== void 0 && !isNaN(gasVal) ? Math.max(0, gasVal) : void 0,
-				rawGasAdc: rawGasVal,
+				rawAdc: rawMq3Val !== void 0 ? Number(rawMq3Val) : 180,
+				gasPpm: gasVal,
+				rawGasAdc: rawGasVal ?? 220,
 				knock: knockVal,
-				knockCount: knockCountVal,
+				knockCount: calibratedKnockCount,
 				flame: flameVal,
-				flameRawAdc: flameRawVal,
+				flameRawAdc: cleanIrDigitalPin,
 				speed: obj.speed ?? obj.spd ?? obj.s,
 				rpm: obj.rpm ?? obj.r,
 				gx: obj.gx ?? obj.x,
@@ -13753,12 +13782,12 @@ var ARDUINO_SKETCHES = {
  *   Close the Arduino IDE Serial Monitor before clicking "CONNECT USB" in the
  *   web app (only one program can open the COM port at a time!).
  *
- * ESP32-S3 SAFE PINOUT:
- *   1. Knock / Tap Sensor (KY-031 / SW-420): DOUT (S) -> GPIO 13 | VCC -> 3.3V/5V | GND -> GND
- *   2. MQ-3 Alcohol Sensor:                  AOUT     -> GPIO 4  | VCC -> 5V      | GND -> GND
- *   3. MQ-9 Gas / CO Sensor:                 AOUT     -> GPIO 5  | VCC -> 5V      | GND -> GND
- *   4. Flame Sensor (KY-026 IR):             DOUT     -> GPIO 14 | AOUT -> GPIO 6 | GND -> GND
- *   5. 12V Starter Relay:                    IN       -> GPIO 12 | VCC -> 5V      | GND -> GND
+ * ESP32-S3 SAFE PINOUT (FOR 3-PIN IR SENSOR + KNOCK + ALCOHOL + GAS):
+ *   1. Knock / Tap Sensor (3-Pin KY-031): OUT (S) -> GPIO 13 | VCC -> 3.3V/5V | GND -> GND
+ *   2. 3-Pin IR / Flame Sensor:           OUT     -> GPIO 14 | VCC -> 3.3V/5V | GND -> GND
+ *   3. MQ-3 Alcohol Sensor:               AOUT    -> GPIO 4  | VCC -> 5V      | GND -> GND
+ *   4. MQ-9 Gas / CO Sensor:              AOUT    -> GPIO 5  | VCC -> 5V      | GND -> GND
+ *   5. 12V Starter Relay:                 IN      -> GPIO 12 | VCC -> 5V      | GND -> GND
  */
 
 #include <WiFi.h>
@@ -13771,8 +13800,8 @@ var ARDUINO_SKETCHES = {
 // --- ESP32-S3 Dedicated Pin Definitions ---
 #define MQ3_PIN        4    // 1. MQ-3 Alcohol Sensor Analog (ESP32-S3 ADC1_CH3)
 #define MQ9_PIN        5    // 2. MQ-9 Gas Sensor Analog (ESP32-S3 ADC1_CH4)
-#define FLAME_ADC_PIN  6    // 3a. KY-026 Flame Sensor Analog (ESP32-S3 ADC1_CH5)
-#define FLAME_DIG_PIN  14   // 3b. KY-026 Flame Sensor Digital (LOW = Flame Detected)
+#define FLAME_DIG_PIN  14   // 3. 3-Pin IR / Flame Sensor OUT Pin (GPIO 14)
+#define FLAME_ALT_PIN  6    // 3b. Alternate pin if 3-Pin IR OUT is plugged into GPIO 6
 #define KNOCK_PIN      13   // 4. KY-031 / SW-420 Knock & Tap Sensor Digital Input
 #define RELAY_PIN      12   // 5. Starter Immobilizer Relay (HIGH = Armed, LOW = Cut-Off)
 
@@ -13790,58 +13819,53 @@ bool bleClientConnected = false;
 
 float bac = 0.00;
 int rawAdc = 180;
-float gasPpm = 20.0;
+float gasPpm = 18.0;
 int rawGasAdc = 220;
-int flameRawAdc = 3950;
+int flameRawAdc = 1; // 1 = HIGH (SAFE/CLEAR), 0 = LOW (IR/FLAME DETECTED)
 bool flameDetected = false;
 bool currentKnock = false;
 bool relayState = true;
 
-int knockBaseline = HIGH;
+int lastKnockPinState = HIGH;
 int flameDigBaseline = HIGH;
+int flameAltBaseline = HIGH;
 int mq3Baseline = 180;
 int mq9Baseline = 220;
-int flameAdcBaseline = 3950;
 volatile int knockCount = 0;
 volatile bool knockInstantFlag = false;
-volatile bool flameInstantFlag = false;
 volatile unsigned long lastKnockIsrUs = 0;
 unsigned long knockHoldUntilMs = 0;
 unsigned long flameHoldUntilMs = 0;
 unsigned long lastTelemetryMs = 0;
 
 // Startup Auto-Calibration: Samples all sensors 16 times over ~400ms to lock ambient baselines!
-// Works with a single 2-pin IR LED (on GPIO 6) OR a KY-026 module, plus MQ-3, MQ-9, and Knock!
 void calibrateAllSensorsBaseline() {
   long sumMq3 = 0;
   long sumMq9 = 0;
-  long sumFlame = 0;
   for (int i = 0; i < 16; i++) {
     sumMq3 += analogRead(MQ3_PIN);
     sumMq9 += analogRead(MQ9_PIN);
-    sumFlame += analogRead(FLAME_ADC_PIN);
     delay(25);
   }
   mq3Baseline = sumMq3 / 16;
   mq9Baseline = sumMq9 / 16;
-  flameAdcBaseline = sumFlame / 16;
-  knockBaseline = digitalRead(KNOCK_PIN);
+  lastKnockPinState = digitalRead(KNOCK_PIN);
   flameDigBaseline = digitalRead(FLAME_DIG_PIN);
+  flameAltBaseline = digitalRead(FLAME_ALT_PIN);
+  knockCount = 0;
+  knockInstantFlag = false;
+  flameDetected = false;
+  currentKnock = false;
 }
 
-// Catches BOTH active-LOW (KY-031) and active-HIGH (SW-420) microsecond tap pulses!
+// 80ms debounce so 1 physical tap = 1 clean count without false noise
 void IRAM_ATTR onKnockPulse() {
   unsigned long nowUs = micros();
-  if (nowUs - lastKnockIsrUs > 25000) { // 25ms debounce so 1 tap = 1 clean count
+  if (nowUs - lastKnockIsrUs > 80000) {
     knockCount++;
     knockInstantFlag = true;
     lastKnockIsrUs = nowUs;
   }
-}
-
-// Catches BOTH active-LOW and active-HIGH KY-026 IR Flame digital pulses!
-void IRAM_ATTR onFlamePulse() {
-  flameInstantFlag = true;
 }
 
 String buildTelemetryJson() {
@@ -13851,7 +13875,7 @@ String buildTelemetryJson() {
   json += "\\"knock\\":" + String(currentKnock ? 1 : 0) + ",";
   json += "\\"kc\\":" + String(knockCount) + ",";
   json += "\\"flame\\":" + String(flameDetected ? 1 : 0) + ",";
-  json += "\\"fadc\\":" + String(flameRawAdc) + ",";
+  json += "\\"fadc\\":" + String(flameDetected ? 0 : 1) + ",";
   json += "\\"gas\\":" + String(gasPpm, 1) + ",";
   json += "\\"gadc\\":" + String(rawGasAdc) + ",";
   json += "\\"rly\\":" + String(relayState ? 1 : 0);
@@ -13922,17 +13946,15 @@ void setup() {
 
   pinMode(KNOCK_PIN, INPUT_PULLUP);
   pinMode(FLAME_DIG_PIN, INPUT_PULLUP);
-  // Enable weak pullup on GPIO 6 so a bare 2-pin IR LED (connected between GPIO 6 and GND) works without an external resistor!
-  pinMode(FLAME_ADC_PIN, INPUT_PULLUP);
+  pinMode(FLAME_ALT_PIN, INPUT_PULLUP);
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
 
   // Calibrate ALL sensors baseline at startup
   calibrateAllSensorsBaseline();
 
-  // Trigger on CHANGE so both active-LOW and active-HIGH sensors work automatically!
+  // Trigger on CHANGE with 80ms debounce
   attachInterrupt(digitalPinToInterrupt(KNOCK_PIN), onKnockPulse, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(FLAME_DIG_PIN), onFlamePulse, CHANGE);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
@@ -13983,34 +14005,32 @@ void loop() {
     }
   }
 
-  // Poll KNOCK_PIN & FLAME_DIG_PIN in loop for immediate response
-  if (digitalRead(KNOCK_PIN) != knockBaseline) {
+  // Edge transition check on KNOCK_PIN (never loops if steady!)
+  int knockNow = digitalRead(KNOCK_PIN);
+  if (knockNow != lastKnockPinState) {
+    lastKnockPinState = knockNow;
     unsigned long nowUs = micros();
-    if (nowUs - lastKnockIsrUs > 40000) {
+    if (nowUs - lastKnockIsrUs > 80000) {
       knockCount++;
       knockInstantFlag = true;
       lastKnockIsrUs = nowUs;
     }
   }
 
-  if (digitalRead(FLAME_DIG_PIN) != flameDigBaseline) {
-    flameInstantFlag = true;
+  // 3-Pin IR Sensor check with 25ms anti-glitch confirmation
+  bool irPinChanged = (digitalRead(FLAME_DIG_PIN) != flameDigBaseline) || (digitalRead(FLAME_ALT_PIN) != flameAltBaseline);
+  if (irPinChanged) {
+    delay(25);
+    if ((digitalRead(FLAME_DIG_PIN) != flameDigBaseline) || (digitalRead(FLAME_ALT_PIN) != flameAltBaseline)) {
+      flameHoldUntilMs = millis() + 2000;
+    }
   }
 
-  // INSTANT 0ms TRANSMISSION WHEN TAPPED OR FLAME DETECTED!
-  if (knockInstantFlag || flameInstantFlag) {
-    if (knockInstantFlag) {
-      knockInstantFlag = false;
-      knockHoldUntilMs = millis() + 750;
-      currentKnock = true;
-    }
-    if (flameInstantFlag) {
-      flameInstantFlag = false;
-      flameHoldUntilMs = millis() + 2500;
-      flameDetected = true;
-      relayState = false;
-      digitalWrite(RELAY_PIN, LOW);
-    }
+  // INSTANT 0ms TRANSMISSION WHEN TAPPED!
+  if (knockInstantFlag) {
+    knockInstantFlag = false;
+    knockHoldUntilMs = millis() + 750;
+    currentKnock = true;
     String instantPayload = buildTelemetryJson();
     Serial.println(instantPayload);
     sendBleTelemetry(instantPayload);
@@ -14022,27 +14042,20 @@ void loop() {
 
     rawAdc = analogRead(MQ3_PIN);
     int mq3Delta = max(0, rawAdc - mq3Baseline);
-    bac = (mq3Delta <= 100) ? 0.00 : (mq3Delta - 100) * 0.00012;
+    bac = (mq3Delta <= 850) ? 0.00 : (mq3Delta - 850) * 0.0001;
 
     currentKnock = (millis() < knockHoldUntilMs);
-
-    flameRawAdc = analogRead(FLAME_ADC_PIN);
-    bool digTriggered = (digitalRead(FLAME_DIG_PIN) != flameDigBaseline);
-    // Sensitive 120 ADC delta from calibrated baseline detects both a single 2-pin IR LED and KY-026!
-    bool adcTriggered = (abs(flameRawAdc - flameAdcBaseline) >= 120);
-    if (digTriggered || adcTriggered) {
-      flameHoldUntilMs = millis() + 2500;
-    }
     flameDetected = (millis() < flameHoldUntilMs);
+    flameRawAdc = flameDetected ? 0 : 1;
 
-    if (flameDetected || bac > 0.03) {
+    if (flameDetected || bac > 0.03 || knockCount >= 4) {
       relayState = false;
       digitalWrite(RELAY_PIN, LOW);
     }
 
     rawGasAdc = analogRead(MQ9_PIN);
     int mq9Delta = max(0, rawGasAdc - mq9Baseline);
-    gasPpm = (mq9Delta <= 80) ? 18.0 : (18.0 + (mq9Delta - 80) * 0.12);
+    gasPpm = (mq9Delta <= 800) ? 18.0 : (18.0 + (mq9Delta - 800) * 0.1);
 
     String payload = buildTelemetryJson();
     Serial.println(payload);
@@ -50582,14 +50595,20 @@ var useAuth = () => {
 };
 // src/utils/emergencyDialer.ts
 /**
-* Configurable Instant Emergency Call Engine (Default: 82199)
-* Supports:
-* 1. Configurable emergency number saved to localStorage (default: 82199)
-* 2. Direct Android APK Intent.ACTION_CALL bridge (window.Android.callNow) when running in native WebView with CALL_PHONE permission
-* 3. Instant 0ms in-app speakerphone + live two-way microphone + ESP32 SIM800L hardware call trigger (NO external tel: dialer popup or SIM card prompt!)
+* Real Two-Way Live Voice Call Engine + Native Android Cellular Bridge (Default: 82199)
+* - ZERO fake speechSynthesis / TTS voices!
+* - Real Two-Way WebRTC Live Audio Call (RTCPeerConnection + getUserMedia):
+*   Caller (Cab Driver) and Callee (Other Person / Emergency Contact on another phone or laptop)
+*   hear each other's real live microphone voice in real time.
+* - Real Native Android Cellular Call (Intent.ACTION_CALL via window.Android.callNow + tel: carrier dialer).
 */
 var STORAGE_KEY = "drivelock_emergency_phone_number";
 var DEFAULT_EMERGENCY_PHONE_NUMBER = "82199";
+var RTC_CONFIG = { iceServers: [
+	{ urls: "stun:stun.l.google.com:19302" },
+	{ urls: "stun:stun1.l.google.com:19302" },
+	{ urls: "stun:stun2.l.google.com:19302" }
+] };
 var getSavedEmergencyNumber = () => {
 	if (typeof window !== "undefined") try {
 		const saved = window.localStorage.getItem(STORAGE_KEY);
@@ -50602,6 +50621,7 @@ var EmergencyCallManager = class {
 	constructor() {
 		this.state = {
 			status: "idle",
+			role: "none",
 			phoneNumber: getSavedEmergencyNumber(),
 			durationSeconds: 0,
 			micActive: false,
@@ -50609,6 +50629,10 @@ var EmergencyCallManager = class {
 			isMuted: false,
 			speakerphoneOn: true,
 			micLevel: 0,
+			remoteVoiceLevel: 0,
+			peerConnected: false,
+			incomingCallAvailable: false,
+			incomingCallerInfo: "",
 			dispatcherSpeaking: false,
 			lastTranscript: "",
 			dispatchTranscript: "",
@@ -50617,13 +50641,20 @@ var EmergencyCallManager = class {
 		this.listeners = /* @__PURE__ */ new Set();
 		this.audioCtx = null;
 		this.ringTimer = null;
-		this.connectTimeout = null;
 		this.durationInterval = null;
-		this.micInterval = null;
+		this.meterInterval = null;
+		this.signalPollInterval = null;
+		this.incomingWatchInterval = null;
 		this.micStream = null;
-		this.analyser = null;
-		this.driverRespondedOnce = false;
-		this.speakingFrames = 0;
+		this.remoteStream = null;
+		this.peerConnection = null;
+		this.remoteAudioEl = null;
+		this.localAnalyser = null;
+		this.remoteAnalyser = null;
+		this.addedCandidateCount = 0;
+		if (typeof window !== "undefined") this.incomingWatchInterval = window.setInterval(() => {
+			this.checkForIncomingCall();
+		}, 1500);
 	}
 	getState() {
 		return this.state;
@@ -50651,10 +50682,20 @@ var EmergencyCallManager = class {
 		const snapshot = { ...this.state };
 		this.listeners.forEach((fn) => fn(snapshot));
 	}
+	ensureRemoteAudioElement() {
+		if (typeof document === "undefined") return null;
+		if (!this.remoteAudioEl) {
+			const el = document.createElement("audio");
+			el.autoplay = true;
+			el.playsInline = true;
+			el.style.display = "none";
+			document.body.appendChild(el);
+			this.remoteAudioEl = el;
+		}
+		return this.remoteAudioEl;
+	}
 	/**
-	* Executes direct Android APK Intent.ACTION_CALL bridge ONLY if present (with CALL_PHONE permission).
-	* Passes both the raw phone number and the structured `place_immediate_call` JSON payload.
-	* Does NOT redirect to external browser `tel:` dialer so the user is never forced to pick a SIM card or tap dial.
+	* Executes direct Android APK Intent.ACTION_CALL bridge if running inside the Capacitor Android app.
 	*/
 	triggerNativeAndroidBridgeIfAvailable(targetNumber, fnPayload) {
 		const cleanNum = (targetNumber || this.state.phoneNumber || "82199").replace(/[^0-9+*#]/g, "");
@@ -50685,10 +50726,19 @@ var EmergencyCallManager = class {
 		return false;
 	}
 	/**
-	* Invokes the server-side Gemini Hands-Free Voice Assistant (`/api/voice-call-agent`),
-	* receives the structured `place_immediate_call` FunctionCall JSON, and immediately
-	* places the 0ms instant speakerphone + Android Intent.ACTION_CALL call.
+	* Dials the real cellular phone carrier (SIM call) on mobile devices or Android APK.
 	*/
+	dialCellularSimCall(targetNumber) {
+		const cleanNum = (targetNumber || this.state.phoneNumber || "82199").replace(/[^0-9+*#]/g, "");
+		if (this.triggerNativeAndroidBridgeIfAvailable(cleanNum)) return;
+		if (typeof window !== "undefined" && typeof document !== "undefined") {
+			const a = document.createElement("a");
+			a.href = `tel:${cleanNum}`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+		}
+	}
 	async executeVoiceCommandCall(utterance, context) {
 		const defaultNum = this.state.phoneNumber || "82199";
 		try {
@@ -50704,7 +50754,7 @@ var EmergencyCallManager = class {
 			const data = await res.json();
 			const targetNum = data.resolvedPhoneNumber || data.functionCall?.args?.target || defaultNum;
 			this.state.lastFunctionCall = data;
-			this.startInstantCall(targetNum, context, data);
+			await this.startInstantCall(targetNum, context, data);
 			return data;
 		} catch (e) {
 			const match = utterance.match(/[+0-9][0-9\-\s().+*#]{1,20}/);
@@ -50718,16 +50768,15 @@ var EmergencyCallManager = class {
 				androidIntentJava: `startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:${extracted}")));`
 			};
 			this.state.lastFunctionCall = fallbackPayload;
-			this.startInstantCall(extracted, context, fallbackPayload);
+			await this.startInstantCall(extracted, context, fallbackPayload);
 			return fallbackPayload;
 		}
 	}
 	/**
-	* Instantly connects a 0ms direct emergency call to the configured number (default 82199)
-	* with zero touch needed, zero SIM selector popup, live speakerphone dispatch audio,
-	* live hands-free microphone stream, and ESP32 SIM800L hardware call trigger.
+	* Starts a REAL Two-Way Live WebRTC Voice Call (Driver -> Other Person) + triggers Android/GSM call.
+	* NO fake TTS voice is ever played.
 	*/
-	startInstantCall(phoneNumber, context, explicitPayload) {
+	async startInstantCall(phoneNumber, context, explicitPayload) {
 		const activeNum = (phoneNumber || this.state.phoneNumber || "82199").replace(/[^0-9+*#]/g, "").trim() || "82199";
 		this.lastContext = context;
 		const fnPayload = explicitPayload || {
@@ -50743,91 +50792,235 @@ var EmergencyCallManager = class {
 			espManager.sendCommand(`CALL:${activeNum}`);
 		} catch (e) {}
 		this.triggerNativeAndroidBridgeIfAvailable(activeNum, fnPayload);
+		if (this.state.status === "ringing" || this.state.status === "connected") return;
+		this.cleanupSession(false);
 		const unit = context?.unitNumber || "AUTO-101";
-		const impact = context?.impactG ? `${context.impactG.toFixed(1)}G` : "high-G";
 		const lat = context?.latitude ? context.latitude.toFixed(4) : "37.7749";
 		const lon = context?.longitude ? context.longitude.toFixed(4) : "-122.4194";
-		const dispatchGreeting = context?.reason === "SOS" ? `Emergency Dispatch ${activeNum} connected instantly on speakerphone. SOS alert received from unit ${unit} at GPS ${lat}, ${lon}. Rescue units are en route. Driver, your mic is live, go ahead.` : context?.reason === "DIRECT" ? `Emergency Dispatch ${activeNum} connected instantly on speakerphone for unit ${unit} at GPS ${lat}, ${lon}. Priority operator is on the line, go ahead driver.` : `Emergency Dispatch ${activeNum} connected instantly on speakerphone. Automatic ${impact} crash detected on unit ${unit} at GPS ${lat}, ${lon}. Ambulance and rescue units dispatched immediately. Driver, your microphone is live—can you hear me?`;
-		if (this.state.status === "connected") {
-			this.state.phoneNumber = activeNum;
-			this.state.lastFunctionCall = fnPayload;
-			this.playPickupClick();
-			this.speakDispatchMessage(dispatchGreeting);
-			return;
-		}
-		this.cleanupTimers();
-		this.driverRespondedOnce = false;
-		this.speakingFrames = 0;
 		this.state = {
-			status: "connected",
+			...this.state,
+			status: "ringing",
+			role: "caller",
 			phoneNumber: activeNum,
 			durationSeconds: 0,
-			micActive: true,
+			micActive: false,
 			micMuted: false,
 			isMuted: false,
 			speakerphoneOn: true,
-			micLevel: 38,
-			dispatcherSpeaking: true,
-			lastTranscript: `DISPATCH (${activeNum}): "${dispatchGreeting}"`,
-			dispatchTranscript: dispatchGreeting,
+			micLevel: 0,
+			remoteVoiceLevel: 0,
+			peerConnected: false,
+			incomingCallAvailable: false,
+			dispatcherSpeaking: false,
+			dispatchTranscript: `Ringing ${activeNum}... Open this app on another phone/laptop and tap "ANSWER LIVE CALL (${activeNum})" to talk two-way with real voice, or tap "DIAL SIM CELLULAR CALL" for carrier phone call.`,
+			lastTranscript: `RINGING ${activeNum} (Unit ${unit} @ GPS ${lat}, ${lon})`,
 			lastFunctionCall: fnPayload
 		};
 		this.emit();
-		this.playPickupClick();
-		this.openHandsFreeMicrophone();
-		this.durationInterval = window.setInterval(() => {
-			this.state.durationSeconds += 1;
-			this.emit();
-		}, 1e3);
-		this.speakDispatchMessage(dispatchGreeting);
-	}
-	reannounceDispatch(context) {
-		const ctx = context || this.lastContext;
-		const unit = ctx?.unitNumber || "AUTO-101";
-		const impact = ctx?.impactG ? `${ctx.impactG.toFixed(1)}G` : "high-G";
-		const lat = ctx?.latitude ? ctx.latitude.toFixed(4) : "37.7749";
-		const lon = ctx?.longitude ? ctx.longitude.toFixed(4) : "-122.4194";
-		const dispatchGreeting = ctx?.reason === "SOS" ? `Emergency Dispatch ${this.state.phoneNumber} connected on speakerphone. SOS alert received from unit ${unit} at GPS ${lat}, ${lon}. Rescue units are en route. Driver, your mic is live, go ahead.` : ctx?.reason === "DIRECT" ? `Emergency Dispatch ${this.state.phoneNumber} connected on speakerphone for unit ${unit} at GPS ${lat}, ${lon}. Operator is on the line, go ahead driver.` : `Emergency Dispatch ${this.state.phoneNumber} connected on speakerphone. Automatic ${impact} crash detected on unit ${unit} at GPS ${lat}, ${lon}. Ambulance and rescue units dispatched immediately. Driver, your microphone is live—can you hear me?`;
-		this.playPickupClick();
-		this.speakDispatchMessage(dispatchGreeting);
-	}
-	speakDispatchMessage(text) {
-		this.state.lastTranscript = `DISPATCH (${this.state.phoneNumber}): "${text}"`;
-		this.state.dispatchTranscript = text;
-		this.state.dispatcherSpeaking = true;
-		this.emit();
-		if (typeof window !== "undefined" && "speechSynthesis" in window) try {
-			window.speechSynthesis.cancel();
-			window.speechSynthesis.resume();
-			const utterance = new SpeechSynthesisUtterance(text);
-			utterance.rate = 1.04;
-			utterance.pitch = .96;
-			utterance.volume = 1;
-			const voices = window.speechSynthesis.getVoices();
-			if (voices && voices.length > 0) {
-				const preferred = voices.find((v) => v.lang.startsWith("en") && v.localService) || voices.find((v) => v.lang.startsWith("en"));
-				if (preferred) utterance.voice = preferred;
-			}
-			utterance.onend = () => {
-				this.state.dispatcherSpeaking = false;
-				this.emit();
+		this.startRingbackTone();
+		try {
+			const stream = await this.openLocalMicrophone();
+			const pc = new RTCPeerConnection(RTC_CONFIG);
+			this.peerConnection = pc;
+			this.addedCandidateCount = 0;
+			if (stream) stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+			else pc.addTransceiver("audio", { direction: "sendrecv" });
+			pc.ontrack = (event) => {
+				const [remoteMediaStream] = event.streams;
+				if (remoteMediaStream) this.attachRemoteAudioStream(remoteMediaStream);
 			};
-			utterance.onerror = () => {
-				this.state.dispatcherSpeaking = false;
-				this.emit();
+			pc.onicecandidate = (event) => {
+				if (event.candidate) fetch("/api/webrtc/candidate", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						roomId: activeNum,
+						role: "caller",
+						candidate: event.candidate.toJSON()
+					})
+				}).catch(() => {});
 			};
-			window.speechSynthesis.speak(utterance);
-		} catch (e) {
-			this.state.dispatcherSpeaking = false;
+			pc.onconnectionstatechange = () => {
+				if (pc.connectionState === "connected") this.onPeerVoiceConnected();
+				else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+					this.state.dispatchTranscript = `Other person on ${activeNum} disconnected.`;
+					this.emit();
+				}
+			};
+			const offer = await pc.createOffer({ offerToReceiveAudio: true });
+			await pc.setLocalDescription(offer);
+			await fetch("/api/webrtc/offer", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					roomId: activeNum,
+					offer: pc.localDescription,
+					callerContext: {
+						unitNumber: unit,
+						latitude: lat,
+						longitude: lon,
+						reason: context?.reason || "CRASH"
+					}
+				})
+			});
+			this.signalPollInterval = window.setInterval(async () => {
+				if (!this.peerConnection || this.state.role !== "caller") return;
+				try {
+					const res = await fetch(`/api/webrtc/room/${encodeURIComponent(activeNum)}`);
+					if (!res.ok) return;
+					const room = await res.json();
+					if (room.status === "idle") {
+						this.endCall(false);
+						return;
+					}
+					if (room.answer && !this.peerConnection.currentRemoteDescription) {
+						await this.peerConnection.setRemoteDescription(new RTCSessionDescription(room.answer));
+						this.onPeerVoiceConnected();
+					}
+					if (this.peerConnection.currentRemoteDescription && Array.isArray(room.calleeCandidates)) while (this.addedCandidateCount < room.calleeCandidates.length) {
+						const cand = room.calleeCandidates[this.addedCandidateCount];
+						this.addedCandidateCount++;
+						try {
+							await this.peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+						} catch (e) {}
+					}
+				} catch (e) {}
+			}, 800);
+		} catch (err) {
+			this.state.dispatchTranscript = `Calling ${activeNum}... Allow microphone access for two-way WebRTC voice or tap "DIAL SIM CELLULAR CALL".`;
 			this.emit();
 		}
-		else setTimeout(() => {
-			this.state.dispatcherSpeaking = false;
-			this.emit();
-		}, 4e3);
 	}
-	async openHandsFreeMicrophone() {
-		if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return;
+	/**
+	* Answers an incoming WebRTC Voice Call as the Other Person (Emergency Contact / Dispatcher).
+	* Connects both microphones & speakers so both people hear each other live!
+	*/
+	async answerIncomingCall(targetRoomNumber) {
+		const activeNum = (targetRoomNumber || this.state.phoneNumber || "82199").replace(/[^0-9+*#]/g, "").trim() || "82199";
+		this.cleanupSession(false);
+		try {
+			const res = await fetch(`/api/webrtc/room/${encodeURIComponent(activeNum)}`);
+			if (!res.ok) return;
+			const room = await res.json();
+			if (!room || !room.offer) {
+				this.state.incomingCallAvailable = false;
+				this.emit();
+				return;
+			}
+			const stream = await this.openLocalMicrophone();
+			const pc = new RTCPeerConnection(RTC_CONFIG);
+			this.peerConnection = pc;
+			this.addedCandidateCount = 0;
+			if (stream) stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+			else pc.addTransceiver("audio", { direction: "sendrecv" });
+			pc.ontrack = (event) => {
+				const [remoteMediaStream] = event.streams;
+				if (remoteMediaStream) this.attachRemoteAudioStream(remoteMediaStream);
+			};
+			pc.onicecandidate = (event) => {
+				if (event.candidate) fetch("/api/webrtc/candidate", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						roomId: activeNum,
+						role: "callee",
+						candidate: event.candidate.toJSON()
+					})
+				}).catch(() => {});
+			};
+			pc.onconnectionstatechange = () => {
+				if (pc.connectionState === "connected") this.onPeerVoiceConnected();
+			};
+			await pc.setRemoteDescription(new RTCSessionDescription(room.offer));
+			if (Array.isArray(room.callerCandidates)) for (const cand of room.callerCandidates) {
+				this.addedCandidateCount++;
+				try {
+					await pc.addIceCandidate(new RTCIceCandidate(cand));
+				} catch (e) {}
+			}
+			const answer = await pc.createAnswer();
+			await pc.setLocalDescription(answer);
+			await fetch("/api/webrtc/answer", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					roomId: activeNum,
+					answer: pc.localDescription
+				})
+			});
+			this.state.role = "callee";
+			this.state.incomingCallAvailable = false;
+			this.onPeerVoiceConnected();
+			this.signalPollInterval = window.setInterval(async () => {
+				if (!this.peerConnection || this.state.role !== "callee") return;
+				try {
+					const pollRes = await fetch(`/api/webrtc/room/${encodeURIComponent(activeNum)}`);
+					if (!pollRes.ok) return;
+					const latestRoom = await pollRes.json();
+					if (latestRoom.status === "idle") {
+						this.endCall(false);
+						return;
+					}
+					if (Array.isArray(latestRoom.callerCandidates)) while (this.addedCandidateCount < latestRoom.callerCandidates.length) {
+						const cand = latestRoom.callerCandidates[this.addedCandidateCount];
+						this.addedCandidateCount++;
+						try {
+							await this.peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+						} catch (e) {}
+					}
+				} catch (e) {}
+			}, 800);
+		} catch (err) {
+			console.error("Failed to answer WebRTC voice call:", err);
+		}
+	}
+	async checkForIncomingCall() {
+		if (this.state.status !== "idle") return;
+		const activeNum = this.state.phoneNumber || "82199";
+		try {
+			const res = await fetch(`/api/webrtc/room/${encodeURIComponent(activeNum)}`);
+			if (!res.ok) return;
+			const room = await res.json();
+			const hasRingingOffer = Boolean(room && room.status === "ringing" && room.offer);
+			const callerUnit = room?.callerContext?.unitNumber || "CAB UNIT";
+			const callerGps = room?.callerContext?.latitude && room?.callerContext?.longitude ? `${room.callerContext.latitude}, ${room.callerContext.longitude}` : "";
+			const info = hasRingingOffer ? `Incoming Emergency Call on ${activeNum} from ${callerUnit}${callerGps ? ` (GPS: ${callerGps})` : ""}` : "";
+			if (hasRingingOffer !== this.state.incomingCallAvailable || info !== this.state.incomingCallerInfo) {
+				this.state.incomingCallAvailable = hasRingingOffer;
+				this.state.incomingCallerInfo = info;
+				this.emit();
+			}
+		} catch (e) {}
+	}
+	onPeerVoiceConnected() {
+		if (this.ringTimer) {
+			window.clearInterval(this.ringTimer);
+			this.ringTimer = null;
+		}
+		if (this.state.status !== "connected") {
+			this.playPickupClick();
+			this.state.status = "connected";
+			this.state.peerConnected = true;
+			this.state.durationSeconds = 0;
+			this.state.dispatchTranscript = "REAL TWO-WAY LIVE VOICE CONNECTED — Speak now! You can hear the other person and they can hear you in real time.";
+			this.state.lastTranscript = this.state.dispatchTranscript;
+			if (this.durationInterval) window.clearInterval(this.durationInterval);
+			this.durationInterval = window.setInterval(() => {
+				this.state.durationSeconds += 1;
+				this.emit();
+			}, 1e3);
+			this.emit();
+		} else if (!this.state.peerConnected) {
+			this.state.peerConnected = true;
+			this.state.dispatchTranscript = "REAL TWO-WAY LIVE VOICE CONNECTED — Speak now! You can hear the other person and they can hear you in real time.";
+			this.emit();
+		}
+	}
+	reannounceDispatch(_context) {
+		this.dialCellularSimCall(this.state.phoneNumber);
+	}
+	async openLocalMicrophone() {
+		if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return null;
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: {
 				echoCancellation: true,
@@ -50839,38 +51032,94 @@ var EmergencyCallManager = class {
 			this.emit();
 			const AudioContextClass = window.AudioContext || window.webkitAudioContext;
 			if (!this.audioCtx || this.audioCtx.state === "closed") this.audioCtx = new AudioContextClass();
+			if (this.audioCtx.state === "suspended") await this.audioCtx.resume().catch(() => {});
 			const source = this.audioCtx.createMediaStreamSource(stream);
-			this.analyser = this.audioCtx.createAnalyser();
-			this.analyser.fftSize = 128;
-			source.connect(this.analyser);
-			const data = new Uint8Array(this.analyser.frequencyBinCount);
-			this.micInterval = window.setInterval(() => {
-				if (!this.analyser || this.state.micMuted) {
-					this.state.micLevel = 0;
-					this.emit();
-					return;
-				}
-				this.analyser.getByteFrequencyData(data);
-				let sum = 0;
-				for (let i = 0; i < data.length; i++) sum += data[i];
-				const avg = sum / data.length;
-				const level = Math.min(100, Math.round(avg / 140 * 100));
-				this.state.micLevel = level;
-				if (this.state.status === "connected" && !this.state.dispatcherSpeaking && !this.driverRespondedOnce && this.state.durationSeconds >= 4) {
-					if (level > 30) {
-						this.speakingFrames += 1;
-						if (this.speakingFrames >= 4) {
-							this.driverRespondedOnce = true;
-							this.speakDispatchMessage(`Copy that driver, we hear you loud and clear on ${this.state.phoneNumber}. Stay safe in the cab, medical and fire teams are 3 minutes away from your GPS pin.`);
-						}
-					} else this.speakingFrames = Math.max(0, this.speakingFrames - 1);
-				}
-				this.emit();
-			}, 100);
+			this.localAnalyser = this.audioCtx.createAnalyser();
+			this.localAnalyser.fftSize = 128;
+			source.connect(this.localAnalyser);
+			this.startAudioLevelMeters();
+			return stream;
 		} catch (err) {
 			this.state.micActive = false;
 			this.emit();
+			return null;
 		}
+	}
+	attachRemoteAudioStream(remoteMediaStream) {
+		this.remoteStream = remoteMediaStream;
+		const audioEl = this.ensureRemoteAudioElement();
+		if (audioEl) {
+			audioEl.srcObject = remoteMediaStream;
+			audioEl.muted = false;
+			audioEl.volume = 1;
+			audioEl.play().catch(() => {});
+		}
+		try {
+			const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+			if (!this.audioCtx || this.audioCtx.state === "closed") this.audioCtx = new AudioContextClass();
+			if (this.audioCtx.state === "suspended") this.audioCtx.resume().catch(() => {});
+			const remoteSource = this.audioCtx.createMediaStreamSource(remoteMediaStream);
+			this.remoteAnalyser = this.audioCtx.createAnalyser();
+			this.remoteAnalyser.fftSize = 128;
+			remoteSource.connect(this.remoteAnalyser);
+			this.startAudioLevelMeters();
+		} catch (e) {}
+	}
+	startAudioLevelMeters() {
+		if (this.meterInterval) window.clearInterval(this.meterInterval);
+		const localData = /* @__PURE__ */ new Uint8Array(64);
+		const remoteData = /* @__PURE__ */ new Uint8Array(64);
+		this.meterInterval = window.setInterval(() => {
+			if (this.localAnalyser && !this.state.micMuted) {
+				this.localAnalyser.getByteFrequencyData(localData);
+				let sum = 0;
+				for (let i = 0; i < localData.length; i++) sum += localData[i];
+				const avg = sum / localData.length;
+				this.state.micLevel = Math.min(100, Math.round(avg / 120 * 100));
+			} else this.state.micLevel = 0;
+			if (this.remoteAnalyser) {
+				this.remoteAnalyser.getByteFrequencyData(remoteData);
+				let rSum = 0;
+				for (let i = 0; i < remoteData.length; i++) rSum += remoteData[i];
+				const rAvg = rSum / remoteData.length;
+				this.state.remoteVoiceLevel = Math.min(100, Math.round(rAvg / 120 * 100));
+				this.state.dispatcherSpeaking = this.state.remoteVoiceLevel > 12;
+			} else {
+				this.state.remoteVoiceLevel = 0;
+				this.state.dispatcherSpeaking = false;
+			}
+			this.emit();
+		}, 100);
+	}
+	startRingbackTone() {
+		if (this.ringTimer) window.clearInterval(this.ringTimer);
+		const playBurst = () => {
+			if (this.state.status !== "ringing") return;
+			try {
+				const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+				if (!this.audioCtx || this.audioCtx.state === "closed") this.audioCtx = new AudioContextClass();
+				if (this.audioCtx.state === "suspended") this.audioCtx.resume();
+				const now = this.audioCtx.currentTime;
+				const osc1 = this.audioCtx.createOscillator();
+				const osc2 = this.audioCtx.createOscillator();
+				const gain = this.audioCtx.createGain();
+				osc1.type = "sine";
+				osc2.type = "sine";
+				osc1.frequency.setValueAtTime(440, now);
+				osc2.frequency.setValueAtTime(480, now);
+				gain.gain.setValueAtTime(.12, now);
+				gain.gain.exponentialRampToValueAtTime(.001, now + 1.1);
+				osc1.connect(gain);
+				osc2.connect(gain);
+				gain.connect(this.audioCtx.destination);
+				osc1.start(now);
+				osc2.start(now);
+				osc1.stop(now + 1.15);
+				osc2.stop(now + 1.15);
+			} catch (e) {}
+		};
+		playBurst();
+		this.ringTimer = window.setInterval(playBurst, 3e3);
 	}
 	playPickupClick() {
 		try {
@@ -50883,13 +51132,12 @@ var EmergencyCallManager = class {
 			osc.type = "triangle";
 			osc.frequency.setValueAtTime(880, now);
 			osc.frequency.setValueAtTime(1320, now + .08);
-			osc.frequency.setValueAtTime(1760, now + .16);
-			gain.gain.setValueAtTime(.28, now);
-			gain.gain.exponentialRampToValueAtTime(.001, now + .28);
+			gain.gain.setValueAtTime(.22, now);
+			gain.gain.exponentialRampToValueAtTime(.001, now + .2);
 			osc.connect(gain);
 			gain.connect(this.audioCtx.destination);
 			osc.start(now);
-			osc.stop(now + .29);
+			osc.stop(now + .22);
 		} catch (e) {}
 	}
 	toggleMute() {
@@ -50900,46 +51148,65 @@ var EmergencyCallManager = class {
 		});
 		this.emit();
 	}
-	endCall() {
-		this.cleanupTimers();
-		if (typeof window !== "undefined" && "speechSynthesis" in window) try {
-			window.speechSynthesis.cancel();
-		} catch (e) {}
-		if (this.micStream) {
-			this.micStream.getTracks().forEach((t) => t.stop());
-			this.micStream = null;
-		}
-		this.state = {
-			status: "idle",
-			phoneNumber: EMERGENCY_PHONE_NUMBER,
-			durationSeconds: 0,
-			micActive: false,
-			micMuted: false,
-			isMuted: false,
-			speakerphoneOn: true,
-			micLevel: 0,
-			dispatcherSpeaking: false,
-			lastTranscript: "",
-			dispatchTranscript: ""
-		};
-		this.emit();
+	endCall(notifyServer = true) {
+		const activeNum = this.state.phoneNumber || "82199";
+		if (notifyServer) fetch("/api/webrtc/hangup", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ roomId: activeNum })
+		}).catch(() => {});
+		this.cleanupSession(true);
 	}
-	cleanupTimers() {
+	cleanupSession(resetToIdle) {
 		if (this.ringTimer) {
 			window.clearInterval(this.ringTimer);
 			this.ringTimer = null;
-		}
-		if (this.connectTimeout) {
-			window.clearTimeout(this.connectTimeout);
-			this.connectTimeout = null;
 		}
 		if (this.durationInterval) {
 			window.clearInterval(this.durationInterval);
 			this.durationInterval = null;
 		}
-		if (this.micInterval) {
-			window.clearInterval(this.micInterval);
-			this.micInterval = null;
+		if (this.meterInterval) {
+			window.clearInterval(this.meterInterval);
+			this.meterInterval = null;
+		}
+		if (this.signalPollInterval) {
+			window.clearInterval(this.signalPollInterval);
+			this.signalPollInterval = null;
+		}
+		if (this.peerConnection) {
+			try {
+				this.peerConnection.close();
+			} catch (e) {}
+			this.peerConnection = null;
+		}
+		if (this.micStream) {
+			this.micStream.getTracks().forEach((t) => t.stop());
+			this.micStream = null;
+		}
+		if (this.remoteAudioEl) this.remoteAudioEl.srcObject = null;
+		this.localAnalyser = null;
+		this.remoteAnalyser = null;
+		if (resetToIdle) {
+			this.state = {
+				status: "idle",
+				role: "none",
+				phoneNumber: EMERGENCY_PHONE_NUMBER,
+				durationSeconds: 0,
+				micActive: false,
+				micMuted: false,
+				isMuted: false,
+				speakerphoneOn: true,
+				micLevel: 0,
+				remoteVoiceLevel: 0,
+				peerConnected: false,
+				incomingCallAvailable: false,
+				incomingCallerInfo: "",
+				dispatcherSpeaking: false,
+				lastTranscript: "",
+				dispatchTranscript: ""
+			};
+			this.emit();
 		}
 	}
 };
@@ -52668,101 +52935,231 @@ var EmergencySosButton = ({ telemetry, onTriggerSos, onCancelSos }) => {
 		emergencyCallManager.setPhoneNumber(numberInput);
 		setIsEditingNumber(false);
 	};
+	const isCallActive = telemetry.sosActive || callState.status === "ringing" || callState.status === "connected";
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 		className: "w-full space-y-2",
-		children: [isEditingNumber && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("form", {
-			onSubmit: handleSaveNumber,
-			className: "p-3 rounded-xl bg-[#161b22] border-2 border-[#38bdf8] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-xl",
-			children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-				className: "text-xs font-headline font-bold text-white flex items-center gap-1.5",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Settings, { className: "w-4 h-4 text-[#38bdf8]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "SET EMERGENCY CALL NUMBER:" })]
-			}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "flex items-center gap-2 flex-1 max-w-md",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
-						type: "tel",
-						value: numberInput,
-						onChange: (e) => setNumberInput(e.target.value),
-						placeholder: "e.g. 82199",
-						className: "flex-1 min-h-[40px] px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#30363d] text-white font-mono text-sm font-bold focus:outline-none focus:border-[#38bdf8]"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-						type: "submit",
-						className: "min-h-[40px] px-3.5 py-1.5 rounded-lg bg-[#10b981] text-black font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer",
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Check, { className: "w-4 h-4" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "SAVE" })]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						type: "button",
-						onClick: () => setIsEditingNumber(false),
-						className: "min-h-[40px] px-2.5 py-1.5 rounded-lg bg-[#21262d] text-[#94a3b8] hover:text-white text-xs cursor-pointer",
-						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(X$1, { className: "w-4 h-4" })
-					})
-				]
-			})]
-		}), telemetry.sosActive || callState.status === "connected" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-			className: "p-3.5 sm:p-4 rounded-xl bg-[#93000a] border-2 sm:border-4 border-white text-white shadow-2xl",
-			children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4",
+		children: [
+			callState.incomingCallAvailable && callState.status === "idle" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				className: "p-3.5 sm:p-4 rounded-xl bg-[#064e3b] border-2 sm:border-4 border-[#10b981] text-white shadow-[0_0_30px_rgba(16,185,129,0.5)] flex flex-col sm:flex-row items-center justify-between gap-3",
 				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 					className: "flex items-center gap-3",
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-						className: "w-11 h-11 sm:w-12 sm:h-12 rounded-lg bg-[#10b981] text-black flex items-center justify-center font-bold shrink-0",
-						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BellRing, { className: "w-6 h-6 sm:w-7 sm:h-7 animate-bounce" })
+						className: "w-11 h-11 rounded-full bg-[#10b981] text-black flex items-center justify-center shrink-0 animate-bounce",
+						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneIncoming, { className: "w-6 h-6" })
 					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "flex items-center gap-2 flex-wrap",
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-								className: "font-mono text-xs font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase",
-								children: [
-									"CONNECTED TO ",
-									activePhone,
-									" · ",
-									formatDuration(callState.durationSeconds)
-								]
-							}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-								className: "font-mono text-xs text-white",
-								children: [
-									"GPS: ",
-									telemetry.gps.latitude.toFixed(4),
-									", ",
-									telemetry.gps.longitude.toFixed(4)
-								]
-							})]
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h3", {
-							className: "font-headline font-bold text-lg sm:text-2xl mt-0.5",
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+							className: "font-mono text-[10px] font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase",
 							children: [
-								"LIVE SPEAKERPHONE CALL ACTIVE (",
+								"INCOMING REAL TWO-WAY VOICE CALL (",
 								activePhone,
 								")"
 							]
 						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", {
+							className: "font-headline font-extrabold text-base sm:text-xl mt-0.5",
+							children: callState.incomingCallerInfo || `Incoming Emergency Call on Line ${activePhone}`
+						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
-							className: "text-xs font-body text-white/90 line-clamp-2",
-							children: callState.dispatchTranscript || `Connected instantly to ${activePhone} on hands-free speakerphone.`
+							className: "text-xs text-emerald-100",
+							children: "Tap Answer to connect your microphone & speaker so both of you hear each other live!"
 						})
 					] })]
+				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+					type: "button",
+					onClick: () => {
+						cabAudio.playSuccessChime();
+						emergencyCallManager.answerIncomingCall(activePhone);
+					},
+					className: "w-full sm:w-auto min-h-[48px] px-5 py-2.5 rounded-xl bg-[#10b981] hover:bg-[#34d399] text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-xl cursor-pointer animate-pulse",
+					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneCall, { className: "w-5 h-5 fill-black" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+						"ANSWER LIVE VOICE CALL (",
+						activePhone,
+						")"
+					] })]
+				})]
+			}),
+			isEditingNumber && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("form", {
+				onSubmit: handleSaveNumber,
+				className: "p-3 rounded-xl bg-[#161b22] border-2 border-[#38bdf8] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-xl",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+					className: "text-xs font-headline font-bold text-white flex items-center gap-1.5",
+					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Settings, { className: "w-4 h-4 text-[#38bdf8]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "SET EMERGENCY CALL NUMBER:" })]
 				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: "flex items-center gap-2.5 w-full sm:w-auto flex-wrap",
+					className: "flex items-center gap-2 flex-1 max-w-md",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
+							type: "tel",
+							value: numberInput,
+							onChange: (e) => setNumberInput(e.target.value),
+							placeholder: "e.g. 82199 or +91...",
+							className: "flex-1 min-h-[40px] px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#30363d] text-white font-mono text-sm font-bold focus:outline-none focus:border-[#38bdf8]"
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+							type: "submit",
+							className: "min-h-[40px] px-3.5 py-1.5 rounded-lg bg-[#10b981] text-black font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Check, { className: "w-4 h-4" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "SAVE" })]
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+							type: "button",
+							onClick: () => setIsEditingNumber(false),
+							className: "min-h-[40px] px-2.5 py-1.5 rounded-lg bg-[#21262d] text-[#94a3b8] hover:text-white text-xs cursor-pointer",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(X$1, { className: "w-4 h-4" })
+						})
+					]
+				})]
+			}),
+			isCallActive ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				className: "p-3.5 sm:p-4 rounded-xl bg-[#93000a] border-2 sm:border-4 border-white text-white shadow-2xl space-y-3",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4",
+					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "flex items-center gap-3",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "w-11 h-11 sm:w-12 sm:h-12 rounded-lg bg-[#10b981] text-black flex items-center justify-center font-bold shrink-0",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BellRing, { className: "w-6 h-6 sm:w-7 sm:h-7 animate-bounce" })
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-2 flex-wrap",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+									className: "font-mono text-xs font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase",
+									children: callState.peerConnected ? `REAL 2-WAY VOICE LIVE (${activePhone}) · ${formatDuration(callState.durationSeconds)}` : `RINGING ${activePhone} (WAITING FOR OTHER PERSON TO ANSWER)`
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+									className: "font-mono text-xs text-white",
+									children: [
+										"GPS: ",
+										telemetry.gps.latitude.toFixed(4),
+										", ",
+										telemetry.gps.longitude.toFixed(4)
+									]
+								})]
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", {
+								className: "font-headline font-bold text-lg sm:text-2xl mt-0.5",
+								children: callState.peerConnected ? `TWO-WAY LIVE CALL CONNECTED (${activePhone})` : `CALLING ${activePhone} — REAL VOICE & SIM DIALER`
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+								className: "text-xs font-body text-white/90",
+								children: callState.dispatchTranscript
+							})
+						] })]
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "flex items-center gap-2 w-full sm:w-auto flex-wrap",
+						children: [
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+								type: "button",
+								onClick: () => {
+									cabAudio.playKeyClick();
+									emergencyCallManager.toggleMute();
+								},
+								className: "flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-black/50 hover:bg-black/70 text-white border border-white/40 font-headline font-bold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer",
+								children: [callState.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-4 h-4 text-[#ff938c]" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-4 h-4 text-[#10b981]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.isMuted ? "UNMUTE MIC" : "MIC LIVE" })]
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("a", {
+								href: `tel:${activePhone}`,
+								onClick: () => emergencyCallManager.dialCellularSimCall(activePhone),
+								className: "flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap shadow-xl cursor-pointer",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Smartphone, { className: "w-4 h-4 text-black" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+									"DIAL SIM CALL (",
+									activePhone,
+									")"
+								] })]
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+								type: "button",
+								onClick: () => {
+									cabAudio.playKeyClick();
+									emergencyCallManager.endCall();
+									onCancelSos();
+								},
+								className: "flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-white text-[#93000a] hover:bg-slate-100 font-headline font-bold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap shadow-lg cursor-pointer",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(CircleX, { className: "w-4 h-4 text-[#93000a]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "END CALL" })]
+							})
+						]
+					})]
+				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-white/20 text-[11px] font-mono",
+					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "bg-black/40 p-2 rounded border border-white/15",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "flex justify-between mb-1",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+								className: "text-[#4edea3] flex items-center gap-1",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-3.5 h-3.5" }), " YOUR MIC (SENT TO OTHER PERSON):"]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.isMuted ? "MUTED" : `${callState.micLevel}%` })]
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "w-full h-2 bg-black/70 rounded-full overflow-hidden",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "h-full bg-[#10b981] transition-all duration-75",
+								style: { width: `${callState.isMuted ? 0 : callState.micLevel}%` }
+							})
+						})]
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "bg-black/40 p-2 rounded border border-white/15",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "flex justify-between mb-1",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+								className: "text-[#38bdf8] flex items-center gap-1",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Radio, { className: "w-3.5 h-3.5" }), " OTHER PERSON VOICE (SPEAKER):"]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.peerConnected ? `${callState.remoteVoiceLevel}% LIVE` : "RINGING..." })]
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "w-full h-2 bg-black/70 rounded-full overflow-hidden",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "h-full bg-[#38bdf8] transition-all duration-75",
+								style: { width: `${callState.remoteVoiceLevel}%` }
+							})
+						})]
+					})]
+				})]
+			}) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				className: "flex flex-col sm:flex-row items-stretch gap-2 w-full",
+				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+					onMouseDown: startHold,
+					onMouseUp: cancelHold,
+					onMouseLeave: cancelHold,
+					onTouchStart: startHold,
+					onTouchEnd: cancelHold,
+					onTouchCancel: cancelHold,
+					className: "relative flex-1 min-h-[64px] sm:min-h-[72px] rounded-xl bg-[#ef4444] hover:bg-[#dc2626] active:bg-[#b91c1c] text-white border-2 border-white font-headline font-bold text-base sm:text-xl tracking-wider uppercase transition-transform flex items-center justify-between px-4 sm:px-6 shadow-[0_4px_24px_rgba(239,68,68,0.4)] overflow-hidden select-none cursor-pointer",
+					"aria-label": "Emergency SOS button",
+					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+						className: "absolute left-0 top-0 bottom-0 bg-[#b91c1c] opacity-80 pointer-events-none transition-all duration-75",
+						style: { width: `${holdProgress}%` }
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "relative z-10 flex items-center gap-2.5 sm:gap-3",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(OctagonAlert, { className: "w-7 h-7 sm:w-8 sm:h-8 text-white shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "text-left",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+								className: "block leading-none text-base sm:text-2xl font-extrabold tracking-tight",
+								children: ["EMERGENCY SOS · CALL ", activePhone]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: "block text-[10px] sm:text-[11px] font-mono tracking-normal text-white/90 uppercase mt-0.5 font-normal",
+								children: isHolding ? `STARTING REAL CALL: ${Math.round(holdProgress)}%` : `4 KNOCKS OR HOLD 1.2s TO START REAL TWO-WAY VOICE + SIM CALL`
+							})]
+						})]
+					})]
+				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "flex items-stretch gap-2 flex-wrap sm:flex-nowrap",
 					children: [
 						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 							type: "button",
-							onClick: () => {
-								cabAudio.playKeyClick();
-								emergencyCallManager.toggleMute();
-							},
-							className: "flex-1 sm:flex-none h-12 px-4 rounded-lg bg-black/50 hover:bg-black/70 text-white border border-white/40 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer",
-							children: [callState.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-4 h-4 text-[#ff938c]" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-4 h-4 text-[#10b981]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.isMuted ? "UNMUTE MIC" : "MIC LIVE" })]
+							onClick: triggerInstantSosCall,
+							className: "flex-1 sm:flex-none min-h-[52px] px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] active:scale-95 text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer whitespace-nowrap",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneCall, { className: "w-4 h-4 fill-black text-black shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+								"Call Now (",
+								activePhone,
+								")"
+							] })]
 						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 							type: "button",
 							onClick: () => {
-								cabAudio.playKeyClick();
-								emergencyCallManager.reannounceDispatch();
+								cabAudio.playSuccessChime();
+								emergencyCallManager.answerIncomingCall(activePhone);
 							},
-							className: "flex-1 sm:flex-none h-12 px-4 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shadow-xl cursor-pointer",
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Volume2, { className: "w-4 h-4 text-black" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-								"REPEAT VOICE (",
+							className: "flex-1 sm:flex-none min-h-[52px] px-3.5 rounded-xl bg-[#0f2942] hover:bg-[#163a5c] text-[#38bdf8] border-2 border-[#38bdf8] font-headline font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap",
+							title: "Open this app on a 2nd phone/laptop and tap here to answer the call and talk back!",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneIncoming, { className: "w-4 h-4 shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+								"ANSWER (",
 								activePhone,
 								")"
 							] })]
@@ -52771,66 +53168,17 @@ var EmergencySosButton = ({ telemetry, onTriggerSos, onCancelSos }) => {
 							type: "button",
 							onClick: () => {
 								cabAudio.playKeyClick();
-								emergencyCallManager.endCall();
-								onCancelSos();
+								setNumberInput(activePhone);
+								setIsEditingNumber(!isEditingNumber);
 							},
-							className: "flex-1 sm:flex-none h-12 px-4 rounded-lg bg-white text-[#93000a] hover:bg-slate-100 font-headline font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shadow-lg cursor-pointer",
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(CircleX, { className: "w-4 h-4 sm:w-5 sm:h-5 text-[#93000a]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "END CALL" })]
+							className: "min-h-[52px] px-3.5 rounded-xl bg-[#1c2b3c] hover:bg-[#273647] text-[#38bdf8] border-2 border-[#38bdf8]/60 font-headline font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap",
+							title: "Configure Emergency Phone Number",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Settings, { className: "w-4 h-4 shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "SET NUMBER" })]
 						})
 					]
 				})]
 			})
-		}) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-			className: "flex flex-col sm:flex-row items-stretch gap-2 w-full",
-			children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-				onMouseDown: startHold,
-				onMouseUp: cancelHold,
-				onMouseLeave: cancelHold,
-				onTouchStart: startHold,
-				onTouchEnd: cancelHold,
-				onTouchCancel: cancelHold,
-				className: "relative flex-1 min-h-[64px] sm:min-h-[72px] rounded-xl bg-[#ef4444] hover:bg-[#dc2626] active:bg-[#b91c1c] text-white border-2 border-white font-headline font-bold text-base sm:text-xl tracking-wider uppercase transition-transform flex items-center justify-between px-4 sm:px-6 shadow-[0_4px_24px_rgba(239,68,68,0.4)] overflow-hidden select-none cursor-pointer",
-				"aria-label": "Emergency SOS button",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-					className: "absolute left-0 top-0 bottom-0 bg-[#b91c1c] opacity-80 pointer-events-none transition-all duration-75",
-					style: { width: `${holdProgress}%` }
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: "relative z-10 flex items-center gap-2.5 sm:gap-3",
-					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(OctagonAlert, { className: "w-7 h-7 sm:w-8 sm:h-8 text-white shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: "text-left",
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-							className: "block leading-none text-base sm:text-2xl font-extrabold tracking-tight",
-							children: ["EMERGENCY SOS · CALL ", activePhone]
-						}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-							className: "block text-[10px] sm:text-[11px] font-mono tracking-normal text-white/90 uppercase mt-0.5 font-normal",
-							children: isHolding ? `CONNECTING INSTANTLY: ${Math.round(holdProgress)}%` : `HOLD 1.2s OR TAP 'CALL NOW' FOR 0ms INSTANT CALL`
-						})]
-					})]
-				})]
-			}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-				className: "flex items-stretch gap-2",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-					type: "button",
-					onClick: triggerInstantSosCall,
-					className: "flex-1 sm:flex-none min-h-[52px] px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] active:scale-95 text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer whitespace-nowrap",
-					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneCall, { className: "w-4 h-4 fill-black text-black shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-						"Call Now (",
-						activePhone,
-						")"
-					] })]
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-					type: "button",
-					onClick: () => {
-						cabAudio.playKeyClick();
-						setNumberInput(activePhone);
-						setIsEditingNumber(!isEditingNumber);
-					},
-					className: "min-h-[52px] px-3.5 rounded-xl bg-[#1c2b3c] hover:bg-[#273647] text-[#38bdf8] border-2 border-[#38bdf8]/60 font-headline font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap",
-					title: "Configure Emergency Phone Number",
-					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Settings, { className: "w-4 h-4 shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "SET NUMBER" })]
-				})]
-			})]
-		})]
+		]
 	});
 };
 // src/components/FleetDiagnosticsView.tsx
@@ -58810,7 +59158,7 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 						})]
 					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
 						className: "text-[11px] font-mono text-[#94a3b8]",
-						children: "ESP32-S3 PINOUT: MQ-3 Alcohol (GPIO 4) · Knock/Tap (GPIO 13) · Flame (GPIO 14 & GPIO 6) · MQ-9 Gas (GPIO 5)"
+						children: "ESP32-S3 PINOUT: MQ-3 Alcohol (GPIO 4) · 3-Pin Knock/Tap (GPIO 13) · 3-Pin IR Sensor OUT (GPIO 14) · MQ-9 Gas (GPIO 5)"
 					})] })]
 				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 					className: "flex items-center gap-2 flex-wrap",
@@ -58921,14 +59269,14 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 				})]
 			}),
 			(() => {
-				const isCrashHappened = sensors.lastKnockType === "crash_impact" || sensors.flameDetected || sensors.knockDetected && isAlcoholViolated;
-				const activeCount = (sensors.knockDetected ? 1 : 0) + (sensors.flameDetected ? 1 : 0) + (isAlcoholViolated ? 1 : 0);
+				const isCrashHappened = sensors.lastKnockType === "crash_impact" || sensors.knockCount >= 4 || sensors.flameDetected || sensors.knockDetected && isAlcoholViolated;
+				const activeCount = (sensors.knockCount > 0 ? 1 : 0) + (sensors.flameDetected ? 1 : 0) + (isAlcoholViolated ? 1 : 0);
 				return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: `mb-3 p-3 rounded-lg border-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all ${isCrashHappened ? "bg-[#3b0a14] border-[#ef4444] shadow-[0_0_25px_rgba(239,68,68,0.45)]" : sensors.knockDetected || isAlcoholViolated ? "bg-[#2e200a] border-[#f59e0b]" : "bg-[#091929] border-[#1e3a5f]"}`,
+					className: `mb-3 p-3 rounded-lg border-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all ${isCrashHappened ? "bg-[#3b0a14] border-[#ef4444] shadow-[0_0_25px_rgba(239,68,68,0.45)]" : sensors.knockCount > 0 || isAlcoholViolated ? "bg-[#2e200a] border-[#f59e0b]" : "bg-[#091929] border-[#1e3a5f]"}`,
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 						className: "flex items-center gap-2.5",
 						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-							className: `w-8 h-8 rounded flex items-center justify-center shrink-0 font-bold ${isCrashHappened ? "bg-[#ef4444] text-white animate-bounce" : sensors.knockDetected || isAlcoholViolated ? "bg-[#f59e0b] text-[#051424]" : "bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/50"}`,
+							className: `w-8 h-8 rounded flex items-center justify-center shrink-0 font-bold ${isCrashHappened ? "bg-[#ef4444] text-white animate-bounce" : sensors.knockCount > 0 || isAlcoholViolated ? "bg-[#f59e0b] text-[#051424]" : "bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/50"}`,
 							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Zap, { className: "w-4 h-4" })
 						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 							className: "flex items-center gap-2 flex-wrap",
@@ -58936,8 +59284,8 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 								className: "text-xs sm:text-sm font-headline font-extrabold text-white uppercase tracking-wide",
 								children: "ALL-SENSOR CRASH FUSION VERDICT:"
 							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: `text-xs font-mono font-extrabold px-2 py-0.5 rounded uppercase ${isCrashHappened ? "bg-[#ef4444] text-white animate-pulse" : sensors.knockDetected ? "bg-[#f59e0b] text-[#051424]" : "bg-[#10b981]/20 text-[#10b981] border border-[#10b981]"}`,
-								children: isCrashHappened ? "🚨 CRASH DETECTED (EMERGENCY CALLING)" : sensors.knockDetected ? "⚠️ CHASSIS TAP DETECTED (TAP AGAIN OR +SENSOR = CRASH)" : "✅ NO CRASH (ALL SENSORS SAFE)"
+								className: `text-xs font-mono font-extrabold px-2 py-0.5 rounded uppercase ${isCrashHappened ? "bg-[#ef4444] text-white animate-pulse" : sensors.knockCount > 0 ? "bg-[#f59e0b] text-[#051424]" : "bg-[#10b981]/20 text-[#10b981] border border-[#10b981]"}`,
+								children: isCrashHappened ? "🚨 4/4 KNOCK / CRASH WAKE (REAL CALL ACTIVE)" : sensors.knockCount > 0 ? `⚠️ KNOCK ${sensors.knockCount}/4 (KNOCK ${Math.max(0, 4 - sensors.knockCount)} MORE TIME(S) TO WAKE CALL)` : "✅ NO CRASH (ALL SENSORS SAFE)"
 							})]
 						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
 							className: "text-[11px] font-mono text-[#94a3b8] mt-0.5",
@@ -58947,11 +59295,11 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 								"/3):",
 								" ",
 								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-									className: sensors.knockDetected ? "text-[#f59e0b] font-bold" : "text-[#10b981]",
+									className: sensors.knockCount > 0 ? "text-[#f59e0b] font-bold" : "text-[#10b981]",
 									children: [
 										"[Knock/Tap: ",
-										sensors.knockDetected ? "TRIGGERED" : "CLEAR",
-										"]"
+										sensors.knockCount,
+										"/4 (Wakes at 4)]"
 									]
 								}),
 								" ",
@@ -58960,8 +59308,8 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
 									className: sensors.flameDetected ? "text-[#ef4444] font-bold" : "text-[#10b981]",
 									children: [
-										"[Fire/Flame: ",
-										sensors.flameDetected ? "FIRE!" : `SAFE (${sensors.flameRawAdc} ADC)`,
+										"[3-Pin IR: ",
+										sensors.flameDetected ? "0 (LOW — FIRE!)" : "1 (HIGH — SAFE)",
 										"]"
 									]
 								}),
@@ -59096,40 +59444,51 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 								})]
 							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] flex items-baseline justify-between",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-									className: "text-[10px] font-mono text-[#94a3b8] uppercase block",
-									children: "KNOCK / TAP PULSES"
-								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-									className: `text-2xl font-mono font-extrabold tabular-nums ${sensors.knockDetected ? "text-[#f59e0b]" : "text-white"}`,
-									children: [
-										sensors.knockCount,
-										" ",
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-											className: "text-xs font-normal text-[#94a3b8]",
-											children: "TAPS"
-										})
-									]
-								})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-									className: "text-right font-mono",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-										className: `text-[10px] font-bold block uppercase ${sensors.knockDetected ? "text-[#f59e0b]" : "text-[#38bdf8]"}`,
-										children: sensors.knockDetected ? "⚡ PULSE ACTIVE" : `LAST: ${sensors.lastKnockType === "none" ? "NONE" : sensors.lastKnockType.toUpperCase()}`
-									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-										className: "text-[10px] text-[#94a3b8] block",
-										children: sensors.lastKnockTimestamp || "READY FOR TAP"
+								className: "my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] space-y-2",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "flex items-baseline justify-between",
+									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+										className: "text-[10px] font-mono text-[#94a3b8] uppercase block",
+										children: "4-KNOCK WAKE COUNTER (WAKES AT 4)"
+									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+										className: `text-2xl font-mono font-extrabold tabular-nums ${sensors.knockCount >= 4 ? "text-[#ef4444]" : sensors.knockCount > 0 ? "text-[#f59e0b]" : "text-white"}`,
+										children: [
+											sensors.knockCount,
+											" / 4",
+											" ",
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+												className: "text-xs font-normal text-[#94a3b8]",
+												children: "KNOCKS"
+											})
+										]
+									})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "text-right font-mono",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+											className: `text-[10px] font-bold block uppercase ${sensors.knockCount >= 4 ? "text-[#ef4444]" : sensors.knockCount > 0 ? "text-[#f59e0b]" : "text-[#38bdf8]"}`,
+											children: sensors.knockCount >= 4 ? "🚨 4/4 WAKE — CALLING!" : sensors.knockCount > 0 ? `⚡ ${4 - sensors.knockCount} MORE TO CALL` : "IDLE (0/4 KNOCKS)"
+										}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+											className: "text-[10px] text-[#94a3b8] block",
+											children: sensors.lastKnockTimestamp || "KNOCK 4X TO CALL"
+										})]
 									})]
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+									className: "grid grid-cols-4 gap-1.5",
+									children: [
+										1,
+										2,
+										3,
+										4
+									].map((step) => {
+										const filled = sensors.knockCount >= step;
+										return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: `h-2 rounded transition-all ${filled ? step === 4 ? "bg-[#ef4444] shadow-[0_0_8px_rgba(239,68,68,0.8)]" : "bg-[#f59e0b]" : "bg-[#161b22] border border-[#30363d]"}` }, step);
+									})
 								})]
 							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 								className: "mb-3 bg-[#161b22] p-2 rounded border border-[#30363d] flex items-center justify-between",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 									className: "text-[10px] font-mono text-[#94a3b8]",
-									children: [
-										"TAP MODE (",
-										sensors.knockSensitivity === "high" ? "CALLS SOS" : "COUNTS TAPS",
-										"):"
-									]
+									children: "WAKE RULE: 4 KNOCKS → REAL CALL"
 								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 									className: "flex items-center gap-1",
 									children: [
@@ -59180,35 +59539,29 @@ var HardwareSensorsSuiteCard = ({ sensors, espConnected, ignitionRelayClosed, on
 										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Flame, { className: "w-4 h-4" })
 									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 										className: "text-xs font-headline font-bold text-white block uppercase",
-										children: "3. 1 IR LED / Flame Sensor (KY-026)"
+										children: "3. 3-Pin IR / Flame Sensor"
 									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 										className: "text-[10px] font-mono text-[#94a3b8] block",
-										children: "ESP32-S3 GPIO 6 (1 IR LED / AO) & GPIO 14 (DO)"
+										children: "3-Pin (VCC · GND · OUT) → ESP32-S3 GPIO 14"
 									})] })]
 								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 									className: `text-[10px] font-mono font-bold px-2 py-0.5 rounded uppercase ${sensors.flameDetected ? "bg-[#ef4444] text-white animate-pulse" : "bg-[#10b981]/20 text-[#10b981] border border-[#10b981]"}`,
-									children: sensors.flameDetected ? "FIRE EMERGENCY" : "BASELINE CALIBRATED"
+									children: sensors.flameDetected ? "IR / FIRE DETECTED" : "CLEAR (IDLE)"
 								})]
 							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 								className: "my-2 p-2.5 rounded bg-[#051424] border border-[#30363d] flex items-baseline justify-between",
 								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 									className: "text-[10px] font-mono text-[#94a3b8] uppercase block",
-									children: "1 IR LED / CABIN IR SPECTRUM"
+									children: "3-PIN IR SENSOR DIGITAL OUTPUT"
 								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 									className: `text-xl font-mono font-extrabold uppercase ${sensors.flameDetected ? "text-[#ef4444]" : "text-[#10b981]"}`,
-									children: sensors.flameDetected ? "FLAME DETECTED!" : "SAFE (CLEAR)"
+									children: sensors.flameDetected ? "0 (LOW — DETECTED!)" : "1 (HIGH — SAFE)"
 								})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 									className: "text-right font-mono",
 									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
 										className: "text-[10px] text-[#ffc174] block",
-										children: [
-											"IR ADC: ",
-											sensors.flameRawAdc,
-											" (BASE: ",
-											espManager.flameBaselineAdc ?? sensors.flameRawAdc,
-											")"
-										]
+										children: ["OUT PIN: ", sensors.flameDetected ? "0 (ACTIVE LOW)" : "1 (IDLE HIGH)"]
 									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
 										className: `text-[10px] font-bold block ${ignitionRelayClosed ? "text-[#10b981]" : "text-[#ef4444]"}`,
 										children: ["FUEL RELAY: ", ignitionRelayClosed ? "ON" : "CUT-OFF"]
@@ -59300,47 +59653,56 @@ var CrashEmergencyModal = ({ isOpen, telemetry, impactG, onCancelCrash }) => {
 					className: "inline-flex items-center justify-center w-14 h-14 rounded-full bg-white text-[#93000a] shadow-xl animate-bounce",
 					children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(OctagonAlert, { className: "w-9 h-9 stroke-[2.5]" })
 				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 						className: "text-[11px] font-mono px-3 py-0.5 rounded-full bg-black/40 text-[#4edea3] font-bold tracking-widest uppercase inline-block mb-1",
-						children: ["0ms INSTANT AUTO-CALL CONNECTED · ", activePhone]
+						children: callState.peerConnected ? `REAL TWO-WAY LIVE VOICE CONNECTED · ${activePhone}` : `REAL VOICE + SIM CALL RINGING · ${activePhone}`
 					}),
 					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("h1", {
 						className: "text-xl sm:text-3xl font-headline font-extrabold text-white tracking-tight",
-						children: ["CRASH DETECTED — CALLING ", activePhone]
+						children: ["EMERGENCY TRIGGERED — CALLING ", activePhone]
 					}),
 					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
 						className: "text-xs sm:text-sm font-mono text-red-100",
 						children: [
-							"Impact shock of ",
+							"4-Knock / Sensor Crash Trigger (",
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("strong", {
 								className: "text-white underline",
 								children: [impactG.toFixed(2), "G"]
 							}),
-							" registered on cab accelerometer"
+							") — Real Two-Way Audio & SIM Call"
 						]
 					})
 				] })]
 			}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 				className: "p-3.5 sm:p-6 space-y-3.5 font-body",
 				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-						type: "button",
-						onClick: () => {
-							cabAudio.playKeyClick();
-							callEmergencyNumber(activePhone, {
-								unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
-								impactG,
-								latitude: telemetry.gps.latitude,
-								longitude: telemetry.gps.longitude,
-								reason: "CRASH"
-							});
-						},
-						className: "w-full min-h-[56px] px-5 py-3 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-base sm:text-lg flex items-center justify-center gap-3 shadow-2xl transition-all cursor-pointer select-none active:scale-95",
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneCall, { className: "w-6 h-6 text-black fill-black animate-bounce" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-							"INSTANT CALL CONNECTED (",
-							activePhone,
-							") · TAP TO RE-ANNOUNCE"
-						] })]
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "grid grid-cols-1 sm:grid-cols-2 gap-2.5",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("a", {
+							href: `tel:${activePhone}`,
+							onClick: () => {
+								cabAudio.playKeyClick();
+								emergencyCallManager.dialCellularSimCall(activePhone);
+							},
+							className: "w-full min-h-[52px] px-4 py-2.5 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Smartphone, { className: "w-5 h-5 text-black shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+								"DIAL REAL SIM CALL (",
+								activePhone,
+								")"
+							] })]
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+							type: "button",
+							onClick: () => {
+								cabAudio.playSuccessChime();
+								emergencyCallManager.answerIncomingCall(activePhone);
+							},
+							className: "w-full min-h-[52px] px-4 py-2.5 rounded-xl bg-[#38bdf8] hover:bg-[#0284c7] text-[#051424] font-headline font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneIncoming, { className: "w-5 h-5 text-[#051424] shrink-0" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+								"ANSWER ON 2ND DEVICE (",
+								activePhone,
+								")"
+							] })]
+						})]
 					}),
 					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 						className: "p-3.5 sm:p-4 rounded-xl bg-[#071a12] border-2 border-[#10b981] shadow-[0_0_25px_rgba(16,185,129,0.25)] space-y-3",
@@ -59354,76 +59716,64 @@ var CrashEmergencyModal = ({ isOpen, telemetry, impactG, onCancelCrash }) => {
 										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PhoneCall, { className: "w-5 h-5 fill-black text-black animate-pulse" })
 									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 										className: "flex items-center gap-2",
-										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "inline-block w-2.5 h-2.5 rounded-full bg-[#10b981] animate-ping" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "inline-block w-2.5 h-2.5 rounded-full bg-[#10b981] animate-ping" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 											className: "font-mono text-xs font-extrabold uppercase tracking-wider text-[#10b981]",
-											children: [
-												"LIVE CONNECTED TO ",
-												activePhone,
-												" · SPEAKERPHONE ON"
-											]
+											children: callState.peerConnected ? `REAL 2-WAY VOICE CONNECTED (${activePhone})` : `RINGING ${activePhone} (WAITING FOR OTHER PERSON)`
 										})]
 									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
 										className: "text-[11px] font-mono text-[#94a3b8]",
-										children: "Instant 0ms two-way speakerphone audio · Zero touch required"
+										children: callState.peerConnected ? "Both microphones & speakers are live — speak and hear each other!" : "Open this app on a 2nd phone/laptop and tap \"ANSWER\" to speak two-way!"
 									})] })]
-								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-									className: "px-3 py-1 rounded bg-black/60 border border-[#10b981]/40 font-mono text-sm font-extrabold text-[#10b981]",
-									children: ["LIVE · ", formatDuration(callState.durationSeconds)]
-								})]
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "space-y-1",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-									className: "flex items-center justify-between text-[10px] font-mono text-[#94a3b8]",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-										className: "flex items-center gap-1 text-[#4edea3]",
-										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Radio, { className: "w-3.5 h-3.5 animate-pulse" }), callState.isMuted ? "CAB MICROPHONE MUTED" : "CAB HANDS-FREE MIC & SPEAKERPHONE LIVE"]
-									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-										"VOICE LEVEL: ",
-										callState.isMuted ? 0 : Math.max(18, callState.micLevel),
-										"%"
-									] })]
 								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-									className: "w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-[#10b981]/30 p-0.5",
-									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "h-full bg-gradient-to-r from-[#10b981] via-[#34d399] to-[#f59e0b] rounded-full transition-all duration-75",
-										style: { width: `${callState.isMuted ? 0 : Math.max(22, callState.micLevel)}%` }
-									})
+									className: "px-3 py-1 rounded bg-black/60 border border-[#10b981]/40 font-mono text-sm font-extrabold text-[#10b981]",
+									children: callState.peerConnected ? `LIVE · ${formatDuration(callState.durationSeconds)}` : "RINGING..."
 								})]
 							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "p-2.5 rounded-lg bg-black/60 border border-[#10b981]/30 font-mono text-xs text-[#d4e4fa] flex items-start gap-2",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Volume2, { className: "w-4 h-4 text-[#10b981] shrink-0 mt-0.5 animate-pulse" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-									className: "leading-relaxed",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-										className: "text-[#10b981] font-bold uppercase block text-[10px]",
-										children: [activePhone, " CENTRAL DISPATCH OPERATOR (SPEAKERPHONE):"]
-									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-										"\"",
-										callState.dispatchTranscript,
-										"\""
-									] })]
+								className: "grid grid-cols-1 sm:grid-cols-2 gap-2.5",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "space-y-1 bg-black/50 p-2.5 rounded-lg border border-[#10b981]/30",
+									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "flex items-center justify-between text-[10px] font-mono text-[#94a3b8]",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+											className: "flex items-center gap-1 text-[#4edea3]",
+											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-3.5 h-3.5 animate-pulse" }), callState.isMuted ? "YOUR MIC MUTED" : "YOUR LIVE MICROPHONE"]
+										}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [callState.isMuted ? 0 : callState.micLevel, "%"] })]
+									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+										className: "w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-[#10b981]/30 p-0.5",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+											className: "h-full bg-[#10b981] rounded-full transition-all duration-75",
+											style: { width: `${callState.isMuted ? 0 : callState.micLevel}%` }
+										})
+									})]
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "space-y-1 bg-black/50 p-2.5 rounded-lg border border-[#38bdf8]/30",
+									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "flex items-center justify-between text-[10px] font-mono text-[#94a3b8]",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+											className: "flex items-center gap-1 text-[#38bdf8]",
+											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Radio, { className: "w-3.5 h-3.5 animate-pulse" }), "OTHER PERSON VOICE (SPEAKER)"]
+										}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.peerConnected ? `${callState.remoteVoiceLevel}%` : "WAITING" })]
+									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+										className: "w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-[#38bdf8]/30 p-0.5",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+											className: "h-full bg-[#38bdf8] rounded-full transition-all duration-75",
+											style: { width: `${callState.remoteVoiceLevel}%` }
+										})
+									})]
 								})]
 							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 								className: "flex items-center gap-2 pt-1",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+								children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 									type: "button",
 									onClick: () => {
 										cabAudio.playKeyClick();
 										emergencyCallManager.toggleMute();
 									},
 									className: `flex-1 py-2.5 px-3 rounded-lg font-headline font-bold text-xs flex items-center justify-center gap-1.5 border transition-colors cursor-pointer ${callState.isMuted ? "bg-[#ef4444]/20 border-[#ef4444] text-[#ff938c]" : "bg-[#10b981]/20 border-[#10b981]/50 text-white hover:bg-[#10b981]/30"}`,
-									children: [callState.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-4 h-4" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-4 h-4 text-[#10b981]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.isMuted ? "UNMUTE CAB MIC" : "MIC LIVE (MUTE)" })]
-								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-									type: "button",
-									onClick: () => {
-										cabAudio.playKeyClick();
-										emergencyCallManager.reannounceDispatch();
-									},
-									className: "flex-1 py-2.5 px-3 rounded-lg bg-[#162737] hover:bg-[#1c3347] text-[#ffc174] border border-[#f59e0b]/40 font-headline font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Volume2, { className: "w-4 h-4 text-[#f59e0b]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "REPEAT GPS VOICE" })]
-								})]
+									children: [callState.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-4 h-4" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-4 h-4 text-[#10b981]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: callState.isMuted ? "UNMUTE YOUR MIC" : "YOUR MIC LIVE (TAP TO MUTE)" })]
+								})
 							})
 						]
 					}),
@@ -59501,7 +59851,7 @@ var CrashEmergencyModal = ({ isOpen, telemetry, impactG, onCancelCrash }) => {
 						className: "pt-2 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3",
 						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 							className: "text-[11px] font-mono text-[#94a3b8]",
-							children: "If this was a false shock trigger or pothole impact:"
+							children: "End emergency call & reset knock counter:"
 						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 							type: "button",
 							onClick: () => {
@@ -59581,7 +59931,7 @@ var INITIAL_TELEMETRY = {
 		lastKnockType: "none",
 		lastKnockTimestamp: null,
 		flameDetected: false,
-		flameRawAdc: 3950,
+		flameRawAdc: 1,
 		lastFlameTimestamp: null
 	},
 	selectedVehicle: FLEET_VEHICLES[0],
@@ -59780,17 +60130,15 @@ function App() {
 						recentTapTimesRef.current = [...recentTapTimesRef.current.filter((t) => nowMs - t < 3500), nowMs];
 					}
 				} else if (packet.knock === false && nowMs > knockLatchUntilRef.current) hwSensors.knockDetected = false;
-				if (packet.flameRawAdc !== void 0 && !isNaN(packet.flameRawAdc)) {
-					hwSensors.flameRawAdc = packet.flameRawAdc;
-					if (espManager.flameBaselineAdc !== null) flameBaselineAdcRef.current = espManager.flameBaselineAdc;
-					else if (flameBaselineAdcRef.current === null && !packet.flame) flameBaselineAdcRef.current = packet.flameRawAdc;
-				}
-				const flameAdcShift = !espManager.isCalibrating && packet.flameRawAdc !== void 0 && flameBaselineAdcRef.current !== null && Math.abs(packet.flameRawAdc - flameBaselineAdcRef.current) >= 120;
-				if (Boolean(packet.flame) || flameAdcShift) {
-					flameLatchUntilRef.current = nowMs + 4500;
+				if (!espManager.isCalibrating && Boolean(packet.flame)) {
+					flameLatchUntilRef.current = nowMs + 3500;
 					hwSensors.flameDetected = true;
+					hwSensors.flameRawAdc = 0;
 					hwSensors.lastFlameTimestamp = (/* @__PURE__ */ new Date()).toLocaleTimeString();
-				} else if (packet.flame === false && nowMs > flameLatchUntilRef.current) hwSensors.flameDetected = false;
+				} else if (packet.flame === false && nowMs > flameLatchUntilRef.current) {
+					hwSensors.flameDetected = false;
+					hwSensors.flameRawAdc = 1;
+				}
 				let gasState = prev.gas;
 				let isGasActive = prev.gas.ppm > prev.gas.thresholdPpm;
 				if (packet.gasPpm !== void 0) {
@@ -59826,16 +60174,15 @@ function App() {
 						status: lockout ? "lockout" : isOver ? "warning" : "safe"
 					};
 				}
-				const recentTapsCount = recentTapTimesRef.current.filter((t) => nowMs - t < 3500).length;
 				const phoneImpactOrTilt = prev.phoneSensors.accel.totalG >= 2.2 || Math.abs(prev.phoneSensors.orientation.rollBankDeg) >= 40 || Math.abs(prev.phoneSensors.orientation.pitchInclineDeg) >= 40 || prev.phoneSensors.sound.decibelsDb >= 85;
 				const activeSensorsList = [];
-				if (hwSensors.knockDetected) activeSensorsList.push(`KY-031 Knock/Impact (${hwSensors.knockCount} taps)`);
-				if (hwSensors.flameDetected) activeSensorsList.push(`KY-026 Flame/Fire (ADC ${hwSensors.flameRawAdc})`);
+				if (hwSensors.knockDetected) activeSensorsList.push(`KY-031 Knock (${hwSensors.knockCount}/4 taps)`);
+				if (hwSensors.flameDetected) activeSensorsList.push(`3-Pin IR/Flame (0 LOW)`);
 				if (isGasActive) activeSensorsList.push(`MQ-9 Gas/Smoke (${gasState.ppm} PPM)`);
 				if (isAlcoholActive) activeSensorsList.push(`MQ-3 Alcohol (${bac.toFixed(3)}% BAC)`);
 				if (phoneImpactOrTilt) activeSensorsList.push(`Cab G-Force/Tilt (${prev.phoneSensors.accel.totalG.toFixed(2)}G)`);
-				const knockCrashTriggered = hwSensors.knockDetected && (hwSensors.knockSensitivity === "high" || hwSensors.knockSensitivity === "medium" && recentTapsCount >= 2 || hwSensors.knockSensitivity === "low" && recentTapsCount >= 3);
-				const multiSensorFusionCrash = activeSensorsList.length >= 2 && (hwSensors.knockDetected || hwSensors.flameDetected || phoneImpactOrTilt);
+				const knockCrashTriggered = hwSensors.knockDetected && hwSensors.knockCount >= 4;
+				const multiSensorFusionCrash = activeSensorsList.length >= 2 && (hwSensors.flameDetected || phoneImpactOrTilt || knockCrashTriggered);
 				const isCrashConfirmed = hwSensors.flameDetected || knockCrashTriggered || multiSensorFusionCrash;
 				if (isCrashConfirmed) {
 					hwSensors.lastKnockType = "crash_impact";
@@ -59857,12 +60204,12 @@ function App() {
 							longitude: prev.gps.longitude,
 							reason: "CRASH"
 						});
-						logEvent(`ALL-SENSOR CRASH CONFIRMED (${activeSensorsList.join(" + ")}) — CALLING ${activeNum}`, "emergency", "MULTI-SENSOR-CRASH", `Multi-sensor fusion confirmed crash/fire [${activeSensorsList.join(", ")}]. Starter & fuel relay cut off. Emergency call placed to ${activeNum}.`);
+						logEvent(`4-KNOCK / SENSOR CRASH WAKE (${activeSensorsList.join(" + ")}) — CALLING ${activeNum}`, "emergency", "MULTI-SENSOR-CRASH", `4 knocks/taps or sensor fusion confirmed emergency [${activeSensorsList.join(", ")}]. Starter relay cut off. Real two-way emergency call placed to ${activeNum}.`);
 					}
 				} else if (isTapEvent && isNewTapPulse) {
 					hwSensors.lastKnockType = "tap";
 					cabAudio.playWarningBuzzer();
-					logEvent(`ESP Knock/Tap Sensor Pulse (#${hwSensors.knockCount})`, "warning", "ESP-KNOCK-TAP", `KY-031 Knock/Tap sensor registered chassis pulse (#${hwSensors.knockCount}). Tap again quickly or trigger another sensor to confirm crash.`);
+					logEvent(`ESP Knock/Tap Sensor Pulse (${hwSensors.knockCount}/4 — Wakes Call at 4)`, "warning", "ESP-KNOCK-TAP", `KY-031 Knock/Tap sensor registered tap ${hwSensors.knockCount} of 4 (${Math.max(0, 4 - hwSensors.knockCount)} more tap(s) to wake emergency call).`);
 				}
 				const newLogs = [rawLine, ...prev.esp.rawLogs].slice(0, 25);
 				return {
@@ -60393,15 +60740,14 @@ function App() {
 	const handleSimulateKnock = (isHardCrash) => {
 		const nowMs = Date.now();
 		knockLatchUntilRef.current = nowMs + 2500;
-		recentTapTimesRef.current = [...recentTapTimesRef.current.filter((t) => nowMs - t < 3500), nowMs];
-		const recentCount = recentTapTimesRef.current.length;
+		recentTapTimesRef.current = [...recentTapTimesRef.current.filter((t) => nowMs - t < 6e3), nowMs];
 		if (isHardCrash) {
 			setTelemetry((prev) => ({
 				...prev,
 				hardwareSensors: {
 					...prev.hardwareSensors,
 					knockDetected: true,
-					knockCount: prev.hardwareSensors.knockCount + 1,
+					knockCount: Math.max(4, prev.hardwareSensors.knockCount + 1),
 					lastKnockType: "crash_impact",
 					lastKnockTimestamp: (/* @__PURE__ */ new Date()).toLocaleTimeString()
 				}
@@ -60411,7 +60757,8 @@ function App() {
 		}
 		setTelemetry((prev) => {
 			const nextCount = prev.hardwareSensors.knockCount + 1;
-			if (prev.hardwareSensors.flameDetected || prev.hardwareSensors.alcoholBac > prev.hardwareSensors.alcoholLimitBac || prev.gas.ppm > prev.gas.thresholdPpm || prev.phoneSensors.accel.totalG >= 2.2 || prev.hardwareSensors.knockSensitivity === "high" || prev.hardwareSensors.knockSensitivity === "medium" && recentCount >= 2 || prev.hardwareSensors.knockSensitivity === "low" && recentCount >= 3) {
+			const otherSensorActive = prev.hardwareSensors.flameDetected || prev.hardwareSensors.alcoholBac > prev.hardwareSensors.alcoholLimitBac || prev.gas.ppm > prev.gas.thresholdPpm || prev.phoneSensors.accel.totalG >= 2.2;
+			if (nextCount >= 4 || otherSensorActive) {
 				const activeNum = emergencyCallManager.getPhoneNumber();
 				cabAudio.playEmergencyAlarm();
 				espManager.sendCommand("RELAY:0");
@@ -60424,7 +60771,7 @@ function App() {
 					longitude: prev.gps.longitude,
 					reason: "CRASH"
 				});
-				logEvent(`ALL-SENSOR CRASH DETECTED — CALLING ${activeNum}`, "emergency", "MULTI-SENSOR-CRASH", `Knock/Impact sensor + multi-sensor fusion confirmed vehicle crash. Starter relay cut off. Calling ${activeNum}.`);
+				logEvent(`4-KNOCK EMERGENCY WAKE (${nextCount}/4 TAPS) — CALLING ${activeNum}`, "emergency", "KNOCK-4X-WAKE", `Knock/Tap sensor reached ${nextCount}/4 taps. Starter relay cut off. Placing real two-way call to ${activeNum}.`);
 				return {
 					...prev,
 					sosActive: true,
@@ -60443,7 +60790,7 @@ function App() {
 			}
 			cabAudio.playWarningBuzzer();
 			if ("vibrate" in navigator) navigator.vibrate(120);
-			logEvent(`KY-031 Knock / Tap Sensor Pulse (#${nextCount})`, "warning", "KNOCK-TAP", `Knock/Tap sensor registered physical chassis tap (#${nextCount}).`);
+			logEvent(`KY-031 Knock / Tap Sensor Pulse (${nextCount}/4 — Wakes at 4)`, "warning", "KNOCK-TAP", `Knock/Tap sensor registered tap ${nextCount} of 4 (${4 - nextCount} more tap(s) to wake emergency call).`);
 			return {
 				...prev,
 				hardwareSensors: {
@@ -60459,7 +60806,9 @@ function App() {
 	const handleResetKnocks = () => {
 		cabAudio.playKeyClick();
 		knockLatchUntilRef.current = 0;
+		lastLoggedKnockCountRef.current = 0;
 		recentTapTimesRef.current = [];
+		espManager.recalibrateBaselines();
 		setTelemetry((prev) => {
 			const canArm = prev.dockLocked && prev.interlock.status === "passed" && !prev.gas.isLockoutActive && !prev.hardwareSensors.flameDetected;
 			if (canArm) espManager.sendCommand("RELAY:1");
@@ -60532,7 +60881,7 @@ function App() {
 				hardwareSensors: {
 					...prev.hardwareSensors,
 					flameDetected: false,
-					flameRawAdc: 3950
+					flameRawAdc: 1
 				},
 				sosActive: false,
 				safetyStatus: canArm ? "OPERATIONAL_READY" : "IMMOBILIZED",

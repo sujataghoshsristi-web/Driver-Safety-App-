@@ -102,7 +102,7 @@ const INITIAL_TELEMETRY: TelemetryData = {
     lastKnockType: 'none',
     lastKnockTimestamp: null,
     flameDetected: false,
-    flameRawAdc: 3950,
+    flameRawAdc: 1,
     lastFlameTimestamp: null,
   },
   selectedVehicle: FLEET_VEHICLES[0],
@@ -368,30 +368,17 @@ export default function App() {
           hwSensors.knockDetected = false;
         }
 
-        // 3. Process 1 IR LED / KY-026 Flame Sensor (Startup Baseline Calibration + 120 ADC Delta Detection)
-        if (packet.flameRawAdc !== undefined && !isNaN(packet.flameRawAdc)) {
-          hwSensors.flameRawAdc = packet.flameRawAdc;
-          if (espManager.flameBaselineAdc !== null) {
-            flameBaselineAdcRef.current = espManager.flameBaselineAdc;
-          } else if (flameBaselineAdcRef.current === null && !packet.flame) {
-            flameBaselineAdcRef.current = packet.flameRawAdc;
-          }
-        }
-
-        const flameAdcShift =
-          !espManager.isCalibrating &&
-          packet.flameRawAdc !== undefined &&
-          flameBaselineAdcRef.current !== null &&
-          Math.abs(packet.flameRawAdc - flameBaselineAdcRef.current) >= 120;
-
-        const isFlameTriggeredNow = Boolean(packet.flame) || flameAdcShift;
+        // 3. Process 3-Pin IR / Flame Sensor (Digital OUT: 1 = HIGH/SAFE, 0 = LOW/DETECTED)
+        const isFlameTriggeredNow = !espManager.isCalibrating && Boolean(packet.flame);
 
         if (isFlameTriggeredNow) {
-          flameLatchUntilRef.current = nowMs + 4500;
+          flameLatchUntilRef.current = nowMs + 3500;
           hwSensors.flameDetected = true;
+          hwSensors.flameRawAdc = 0; // Digital 0 (LOW = IR/Flame Detected)
           hwSensors.lastFlameTimestamp = new Date().toLocaleTimeString();
         } else if (packet.flame === false && nowMs > flameLatchUntilRef.current) {
           hwSensors.flameDetected = false;
+          hwSensors.flameRawAdc = 1; // Digital 1 (HIGH = Safe/Clear)
         }
 
         // 4. Process MQ-9 Gas / Smoke Sensor Data
@@ -441,9 +428,8 @@ export default function App() {
         }
 
         // 5. ALL-SENSOR CRASH DETECTION FUSION ENGINE
-        // Combines: (1) Knock/Tap KY-031, (2) Flame/Fire KY-026, (3) Gas/Smoke MQ-9,
-        // (4) Alcohol MQ-3, and (5) Phone G-Force / Rollover Tilt / Cabin Sound
-        const recentTapsCount = recentTapTimesRef.current.filter((t) => nowMs - t < 3500).length;
+        // Combines: (1) Knock/Tap KY-031 (Wakes after 4 knocks/taps!), (2) 3-Pin IR / Flame,
+        // (3) Gas/Smoke MQ-9, (4) Alcohol MQ-3, and (5) Phone G-Force / Rollover Tilt / Cabin Sound
         const phoneImpactOrTilt =
           prev.phoneSensors.accel.totalG >= 2.2 ||
           Math.abs(prev.phoneSensors.orientation.rollBankDeg) >= 40 ||
@@ -451,20 +437,17 @@ export default function App() {
           prev.phoneSensors.sound.decibelsDb >= 85;
 
         const activeSensorsList: string[] = [];
-        if (hwSensors.knockDetected) activeSensorsList.push(`KY-031 Knock/Impact (${hwSensors.knockCount} taps)`);
-        if (hwSensors.flameDetected) activeSensorsList.push(`KY-026 Flame/Fire (ADC ${hwSensors.flameRawAdc})`);
+        if (hwSensors.knockDetected) activeSensorsList.push(`KY-031 Knock (${hwSensors.knockCount}/4 taps)`);
+        if (hwSensors.flameDetected) activeSensorsList.push(`3-Pin IR/Flame (0 LOW)`);
         if (isGasActive) activeSensorsList.push(`MQ-9 Gas/Smoke (${gasState.ppm} PPM)`);
         if (isAlcoholActive) activeSensorsList.push(`MQ-3 Alcohol (${bac.toFixed(3)}% BAC)`);
         if (phoneImpactOrTilt) activeSensorsList.push(`Cab G-Force/Tilt (${prev.phoneSensors.accel.totalG.toFixed(2)}G)`);
 
-        const knockCrashTriggered =
-          hwSensors.knockDetected &&
-          (hwSensors.knockSensitivity === 'high' ||
-            (hwSensors.knockSensitivity === 'medium' && recentTapsCount >= 2) ||
-            (hwSensors.knockSensitivity === 'low' && recentTapsCount >= 3));
+        // Require 4 knocks/taps (knockCount >= 4) on the Knock Sensor to wake emergency call!
+        const knockCrashTriggered = hwSensors.knockDetected && hwSensors.knockCount >= 4;
 
         const multiSensorFusionCrash =
-          activeSensorsList.length >= 2 && (hwSensors.knockDetected || hwSensors.flameDetected || phoneImpactOrTilt);
+          activeSensorsList.length >= 2 && (hwSensors.flameDetected || phoneImpactOrTilt || knockCrashTriggered);
 
         const isCrashConfirmed = hwSensors.flameDetected || knockCrashTriggered || multiSensorFusionCrash;
 
@@ -490,20 +473,20 @@ export default function App() {
               reason: 'CRASH',
             });
             logEvent(
-              `ALL-SENSOR CRASH CONFIRMED (${activeSensorsList.join(' + ')}) — CALLING ${activeNum}`,
+              `4-KNOCK / SENSOR CRASH WAKE (${activeSensorsList.join(' + ')}) — CALLING ${activeNum}`,
               'emergency',
               'MULTI-SENSOR-CRASH',
-              `Multi-sensor fusion confirmed crash/fire [${activeSensorsList.join(', ')}]. Starter & fuel relay cut off. Emergency call placed to ${activeNum}.`
+              `4 knocks/taps or sensor fusion confirmed emergency [${activeSensorsList.join(', ')}]. Starter relay cut off. Real two-way emergency call placed to ${activeNum}.`
             );
           }
         } else if (isTapEvent && isNewTapPulse) {
           hwSensors.lastKnockType = 'tap';
           cabAudio.playWarningBuzzer();
           logEvent(
-            `ESP Knock/Tap Sensor Pulse (#${hwSensors.knockCount})`,
+            `ESP Knock/Tap Sensor Pulse (${hwSensors.knockCount}/4 — Wakes Call at 4)`,
             'warning',
             'ESP-KNOCK-TAP',
-            `KY-031 Knock/Tap sensor registered chassis pulse (#${hwSensors.knockCount}). Tap again quickly or trigger another sensor to confirm crash.`
+            `KY-031 Knock/Tap sensor registered tap ${hwSensors.knockCount} of 4 (${Math.max(0, 4 - hwSensors.knockCount)} more tap(s) to wake emergency call).`
           );
         }
 
@@ -1196,10 +1179,9 @@ export default function App() {
     const nowMs = Date.now();
     knockLatchUntilRef.current = nowMs + 2500;
     recentTapTimesRef.current = [
-      ...recentTapTimesRef.current.filter((t) => nowMs - t < 3500),
+      ...recentTapTimesRef.current.filter((t) => nowMs - t < 6000),
       nowMs,
     ];
-    const recentCount = recentTapTimesRef.current.length;
 
     if (isHardCrash) {
       setTelemetry((prev) => ({
@@ -1207,7 +1189,7 @@ export default function App() {
         hardwareSensors: {
           ...prev.hardwareSensors,
           knockDetected: true,
-          knockCount: prev.hardwareSensors.knockCount + 1,
+          knockCount: Math.max(4, prev.hardwareSensors.knockCount + 1),
           lastKnockType: 'crash_impact',
           lastKnockTimestamp: new Date().toLocaleTimeString(),
         },
@@ -1224,13 +1206,10 @@ export default function App() {
         prev.gas.ppm > prev.gas.thresholdPpm ||
         prev.phoneSensors.accel.totalG >= 2.2;
 
-      const isMultiCrash =
-        otherSensorActive ||
-        prev.hardwareSensors.knockSensitivity === 'high' ||
-        (prev.hardwareSensors.knockSensitivity === 'medium' && recentCount >= 2) ||
-        (prev.hardwareSensors.knockSensitivity === 'low' && recentCount >= 3);
+      // Wake emergency call on the 4th knock/tap (nextCount >= 4)
+      const isFourKnockWake = nextCount >= 4 || otherSensorActive;
 
-      if (isMultiCrash) {
+      if (isFourKnockWake) {
         const activeNum = emergencyCallManager.getPhoneNumber();
         cabAudio.playEmergencyAlarm();
         espManager.sendCommand('RELAY:0');
@@ -1244,10 +1223,10 @@ export default function App() {
           reason: 'CRASH',
         });
         logEvent(
-          `ALL-SENSOR CRASH DETECTED — CALLING ${activeNum}`,
+          `4-KNOCK EMERGENCY WAKE (${nextCount}/4 TAPS) — CALLING ${activeNum}`,
           'emergency',
-          'MULTI-SENSOR-CRASH',
-          `Knock/Impact sensor + multi-sensor fusion confirmed vehicle crash. Starter relay cut off. Calling ${activeNum}.`
+          'KNOCK-4X-WAKE',
+          `Knock/Tap sensor reached ${nextCount}/4 taps. Starter relay cut off. Placing real two-way call to ${activeNum}.`
         );
         return {
           ...prev,
@@ -1269,10 +1248,10 @@ export default function App() {
       cabAudio.playWarningBuzzer();
       if ('vibrate' in navigator) navigator.vibrate(120);
       logEvent(
-        `KY-031 Knock / Tap Sensor Pulse (#${nextCount})`,
+        `KY-031 Knock / Tap Sensor Pulse (${nextCount}/4 — Wakes at 4)`,
         'warning',
         'KNOCK-TAP',
-        `Knock/Tap sensor registered physical chassis tap (#${nextCount}).`
+        `Knock/Tap sensor registered tap ${nextCount} of 4 (${4 - nextCount} more tap(s) to wake emergency call).`
       );
       return {
         ...prev,
@@ -1290,7 +1269,9 @@ export default function App() {
   const handleResetKnocks = () => {
     cabAudio.playKeyClick();
     knockLatchUntilRef.current = 0;
+    lastLoggedKnockCountRef.current = 0;
     recentTapTimesRef.current = [];
+    espManager.recalibrateBaselines();
     setTelemetry((prev) => {
       const canArm =
         prev.dockLocked &&
@@ -1301,7 +1282,12 @@ export default function App() {
       return {
         ...prev,
         sosActive: prev.hardwareSensors.flameDetected ? prev.sosActive : false,
-        safetyStatus: canArm ? 'OPERATIONAL_READY' : prev.safetyStatus === 'EMERGENCY_CRITICAL' && !prev.hardwareSensors.flameDetected ? 'IMMOBILIZED' : prev.safetyStatus,
+        safetyStatus:
+          canArm
+            ? 'OPERATIONAL_READY'
+            : prev.safetyStatus === 'EMERGENCY_CRITICAL' && !prev.hardwareSensors.flameDetected
+            ? 'IMMOBILIZED'
+            : prev.safetyStatus,
         ignitionRelayClosed: canArm,
         hardwareSensors: {
           ...prev.hardwareSensors,
@@ -1374,7 +1360,7 @@ export default function App() {
         hardwareSensors: {
           ...prev.hardwareSensors,
           flameDetected: false,
-          flameRawAdc: 3950,
+          flameRawAdc: 1,
         },
         sosActive: false,
         safetyStatus: canArm ? 'OPERATIONAL_READY' : 'IMMOBILIZED',

@@ -1,15 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { 
-  AlertOctagon, 
-  PhoneCall, 
-  MapPin, 
-  XCircle, 
-  Volume2,
+import {
+  AlertOctagon,
+  PhoneCall,
+  PhoneIncoming,
+  MapPin,
+  XCircle,
   Mic,
   MicOff,
   Radio,
   Copy,
-  Check
+  Check,
+  Smartphone,
 } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
@@ -43,7 +44,7 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      // Auto-trigger 0ms instant emergency call to configured number
+      // Auto-trigger real two-way WebRTC voice call + native Android SIM call to configured number
       callEmergencyNumber(emergencyCallManager.getPhoneNumber(), {
         unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
         impactG,
@@ -95,36 +96,46 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
           </div>
           <div>
             <span className="text-[11px] font-mono px-3 py-0.5 rounded-full bg-black/40 text-[#4edea3] font-bold tracking-widest uppercase inline-block mb-1">
-              0ms INSTANT AUTO-CALL CONNECTED · {activePhone}
+              {callState.peerConnected
+                ? `REAL TWO-WAY LIVE VOICE CONNECTED · ${activePhone}`
+                : `REAL VOICE + SIM CALL RINGING · ${activePhone}`}
             </span>
             <h1 className="text-xl sm:text-3xl font-headline font-extrabold text-white tracking-tight">
-              CRASH DETECTED — CALLING {activePhone}
+              EMERGENCY TRIGGERED — CALLING {activePhone}
             </h1>
             <p className="text-xs sm:text-sm font-mono text-red-100">
-              Impact shock of <strong className="text-white underline">{impactG.toFixed(2)}G</strong> registered on cab accelerometer
+              4-Knock / Sensor Crash Trigger (<strong className="text-white underline">{impactG.toFixed(2)}G</strong>) — Real Two-Way Audio &amp; SIM Call
             </p>
           </div>
         </div>
 
-        {/* Instant Connected Speakerphone Panel */}
+        {/* Real Two-Way Live Voice + Native SIM Call Panel */}
         <div className="p-3.5 sm:p-6 space-y-3.5 font-body">
-          <button
-            type="button"
-            onClick={() => {
-              cabAudio.playKeyClick();
-              callEmergencyNumber(activePhone, {
-                unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
-                impactG,
-                latitude: telemetry.gps.latitude,
-                longitude: telemetry.gps.longitude,
-                reason: 'CRASH',
-              });
-            }}
-            className="w-full min-h-[56px] px-5 py-3 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-base sm:text-lg flex items-center justify-center gap-3 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
-          >
-            <PhoneCall className="w-6 h-6 text-black fill-black animate-bounce" />
-            <span>INSTANT CALL CONNECTED ({activePhone}) · TAP TO RE-ANNOUNCE</span>
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <a
+              href={`tel:${activePhone}`}
+              onClick={() => {
+                cabAudio.playKeyClick();
+                emergencyCallManager.dialCellularSimCall(activePhone);
+              }}
+              className="w-full min-h-[52px] px-4 py-2.5 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
+            >
+              <Smartphone className="w-5 h-5 text-black shrink-0" />
+              <span>DIAL REAL SIM CALL ({activePhone})</span>
+            </a>
+
+            <button
+              type="button"
+              onClick={() => {
+                cabAudio.playSuccessChime();
+                emergencyCallManager.answerIncomingCall(activePhone);
+              }}
+              className="w-full min-h-[52px] px-4 py-2.5 rounded-xl bg-[#38bdf8] hover:bg-[#0284c7] text-[#051424] font-headline font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
+            >
+              <PhoneIncoming className="w-5 h-5 text-[#051424] shrink-0" />
+              <span>ANSWER ON 2ND DEVICE ({activePhone})</span>
+            </button>
+          </div>
 
           <div className="p-3.5 sm:p-4 rounded-xl bg-[#071a12] border-2 border-[#10b981] shadow-[0_0_25px_rgba(16,185,129,0.25)] space-y-3">
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -136,53 +147,64 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#10b981] animate-ping" />
                     <span className="font-mono text-xs font-extrabold uppercase tracking-wider text-[#10b981]">
-                      LIVE CONNECTED TO {activePhone} · SPEAKERPHONE ON
+                      {callState.peerConnected
+                        ? `REAL 2-WAY VOICE CONNECTED (${activePhone})`
+                        : `RINGING ${activePhone} (WAITING FOR OTHER PERSON)`}
                     </span>
                   </div>
                   <p className="text-[11px] font-mono text-[#94a3b8]">
-                    Instant 0ms two-way speakerphone audio · Zero touch required
+                    {callState.peerConnected
+                      ? 'Both microphones & speakers are live — speak and hear each other!'
+                      : 'Open this app on a 2nd phone/laptop and tap "ANSWER" to speak two-way!'}
                   </p>
                 </div>
               </div>
 
               <div className="px-3 py-1 rounded bg-black/60 border border-[#10b981]/40 font-mono text-sm font-extrabold text-[#10b981]">
-                LIVE · {formatDuration(callState.durationSeconds)}
+                {callState.peerConnected ? `LIVE · ${formatDuration(callState.durationSeconds)}` : 'RINGING...'}
               </div>
             </div>
 
-            {/* Live Microphone & Speaker Audio Level Bar */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-[10px] font-mono text-[#94a3b8]">
-                <span className="flex items-center gap-1 text-[#4edea3]">
-                  <Radio className="w-3.5 h-3.5 animate-pulse" />
-                  {callState.isMuted
-                    ? 'CAB MICROPHONE MUTED'
-                    : 'CAB HANDS-FREE MIC & SPEAKERPHONE LIVE'}
-                </span>
-                <span>VOICE LEVEL: {callState.isMuted ? 0 : Math.max(18, callState.micLevel)}%</span>
+            {/* Real Two-Way Microphone & Remote Speaker Audio Level Bars */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="space-y-1 bg-black/50 p-2.5 rounded-lg border border-[#10b981]/30">
+                <div className="flex items-center justify-between text-[10px] font-mono text-[#94a3b8]">
+                  <span className="flex items-center gap-1 text-[#4edea3]">
+                    <Mic className="w-3.5 h-3.5 animate-pulse" />
+                    {callState.isMuted ? 'YOUR MIC MUTED' : 'YOUR LIVE MICROPHONE'}
+                  </span>
+                  <span>{callState.isMuted ? 0 : callState.micLevel}%</span>
+                </div>
+                <div className="w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-[#10b981]/30 p-0.5">
+                  <div
+                    className="h-full bg-[#10b981] rounded-full transition-all duration-75"
+                    style={{
+                      width: `${callState.isMuted ? 0 : callState.micLevel}%`,
+                    }}
+                  />
+                </div>
               </div>
-              <div className="w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-[#10b981]/30 p-0.5">
-                <div
-                  className="h-full bg-gradient-to-r from-[#10b981] via-[#34d399] to-[#f59e0b] rounded-full transition-all duration-75"
-                  style={{
-                    width: `${callState.isMuted ? 0 : Math.max(22, callState.micLevel)}%`,
-                  }}
-                />
+
+              <div className="space-y-1 bg-black/50 p-2.5 rounded-lg border border-[#38bdf8]/30">
+                <div className="flex items-center justify-between text-[10px] font-mono text-[#94a3b8]">
+                  <span className="flex items-center gap-1 text-[#38bdf8]">
+                    <Radio className="w-3.5 h-3.5 animate-pulse" />
+                    OTHER PERSON VOICE (SPEAKER)
+                  </span>
+                  <span>{callState.peerConnected ? `${callState.remoteVoiceLevel}%` : 'WAITING'}</span>
+                </div>
+                <div className="w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-[#38bdf8]/30 p-0.5">
+                  <div
+                    className="h-full bg-[#38bdf8] rounded-full transition-all duration-75"
+                    style={{
+                      width: `${callState.remoteVoiceLevel}%`,
+                    }}
+                  />
+                </div>
               </div>
             </div>
 
-            {/* Live Dispatch Voice Transcript */}
-            <div className="p-2.5 rounded-lg bg-black/60 border border-[#10b981]/30 font-mono text-xs text-[#d4e4fa] flex items-start gap-2">
-              <Volume2 className="w-4 h-4 text-[#10b981] shrink-0 mt-0.5 animate-pulse" />
-              <div className="leading-relaxed">
-                <span className="text-[#10b981] font-bold uppercase block text-[10px]">
-                  {activePhone} CENTRAL DISPATCH OPERATOR (SPEAKERPHONE):
-                </span>
-                <span>"{callState.dispatchTranscript}"</span>
-              </div>
-            </div>
-
-            {/* Hands-free Call Controls (Mute Mic / Re-broadcast) */}
+            {/* Hands-free Call Controls */}
             <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
@@ -197,27 +219,15 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
                 }`}
               >
                 {callState.isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4 text-[#10b981]" />}
-                <span>{callState.isMuted ? 'UNMUTE CAB MIC' : 'MIC LIVE (MUTE)'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
-                  emergencyCallManager.reannounceDispatch();
-                }}
-                className="flex-1 py-2.5 px-3 rounded-lg bg-[#162737] hover:bg-[#1c3347] text-[#ffc174] border border-[#f59e0b]/40 font-headline font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Volume2 className="w-4 h-4 text-[#f59e0b]" />
-                <span>REPEAT GPS VOICE</span>
+                <span>{callState.isMuted ? 'UNMUTE YOUR MIC' : 'YOUR MIC LIVE (TAP TO MUTE)'}</span>
               </button>
             </div>
           </div>
 
-          {/* Vehicle and GPS telemetry for dispatcher */}
+          {/* Vehicle and GPS telemetry */}
           <div className="p-4 rounded-xl bg-[#0a0203] border border-[#ef4444]/40 space-y-3 font-mono text-xs">
             <div className="flex items-center justify-between text-[#94a3b8] border-b border-white/10 pb-2">
-              <span className="text-white font-bold">INCIDENT LOCATION & UNIT DATA</span>
+              <span className="text-white font-bold">INCIDENT LOCATION &amp; UNIT DATA</span>
               <span className="text-[#ff938c]">ELAPSED: {secondsElapsed}s</span>
             </div>
 
@@ -252,10 +262,10 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
             </div>
           </div>
 
-          {/* Stand Down / Cancel False Alarm */}
+          {/* Stand Down / Cancel Call */}
           <div className="pt-2 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3">
             <span className="text-[11px] font-mono text-[#94a3b8]">
-              If this was a false shock trigger or pothole impact:
+              End emergency call &amp; reset knock counter:
             </span>
 
             <button

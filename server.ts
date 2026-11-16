@@ -109,6 +109,102 @@ async function startServer() {
 
   app.use(express.json());
 
+  // ============================================================================
+  // REAL TWO-WAY WEBRTC VOICE CALL SIGNALING SERVER (Driver <-> Other Person)
+  // ============================================================================
+  interface WebRtcRoom {
+    roomId: string;
+    status: 'ringing' | 'connected' | 'ended';
+    callerContext?: Record<string, any>;
+    offer: RTCSessionDescriptionInit | null;
+    answer: RTCSessionDescriptionInit | null;
+    callerCandidates: RTCIceCandidateInit[];
+    calleeCandidates: RTCIceCandidateInit[];
+    updatedAt: number;
+  }
+
+  const webrtcRooms = new Map<string, WebRtcRoom>();
+
+  // Clean up stale rooms older than 10 minutes
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, room] of webrtcRooms.entries()) {
+      if (now - room.updatedAt > 10 * 60 * 1000) {
+        webrtcRooms.delete(key);
+      }
+    }
+  }, 60_000);
+
+  // GET /api/webrtc/room/:roomId — Poll room state (offer, answer, ICE candidates, status)
+  app.get('/api/webrtc/room/:roomId', (req, res) => {
+    const roomId = (req.params.roomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    const room = webrtcRooms.get(roomId);
+    if (!room) {
+      return res.json({ status: 'idle', roomId });
+    }
+    return res.json(room);
+  });
+
+  // POST /api/webrtc/offer — Caller (Driver Cab) posts WebRTC SDP Offer to start a real 2-way voice call
+  app.post('/api/webrtc/offer', (req, res) => {
+    const { roomId: rawRoomId, offer, callerContext } = req.body || {};
+    const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    if (!offer) {
+      return res.status(400).json({ error: 'Missing WebRTC offer' });
+    }
+    const room: WebRtcRoom = {
+      roomId,
+      status: 'ringing',
+      callerContext: callerContext || {},
+      offer,
+      answer: null,
+      callerCandidates: [],
+      calleeCandidates: [],
+      updatedAt: Date.now(),
+    };
+    webrtcRooms.set(roomId, room);
+    return res.json({ ok: true, room });
+  });
+
+  // POST /api/webrtc/answer — Callee (Other Person / Receiver) posts WebRTC SDP Answer
+  app.post('/api/webrtc/answer', (req, res) => {
+    const { roomId: rawRoomId, answer } = req.body || {};
+    const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    const room = webrtcRooms.get(roomId);
+    if (!room) {
+      return res.status(404).json({ error: 'Call room not found' });
+    }
+    room.answer = answer;
+    room.status = 'connected';
+    room.updatedAt = Date.now();
+    return res.json({ ok: true, room });
+  });
+
+  // POST /api/webrtc/candidate — Exchange ICE candidates between Caller and Callee
+  app.post('/api/webrtc/candidate', (req, res) => {
+    const { roomId: rawRoomId, role, candidate } = req.body || {};
+    const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    const room = webrtcRooms.get(roomId);
+    if (!room || !candidate) {
+      return res.status(404).json({ error: 'Room or candidate not found' });
+    }
+    if (role === 'caller') {
+      room.callerCandidates.push(candidate);
+    } else {
+      room.calleeCandidates.push(candidate);
+    }
+    room.updatedAt = Date.now();
+    return res.json({ ok: true });
+  });
+
+  // POST /api/webrtc/hangup — End the active call in a room
+  app.post('/api/webrtc/hangup', (req, res) => {
+    const { roomId: rawRoomId } = req.body || {};
+    const roomId = String(rawRoomId || '82199').replace(/[^0-9+*#a-zA-Z_-]/g, '') || '82199';
+    webrtcRooms.delete(roomId);
+    return res.json({ ok: true, status: 'idle' });
+  });
+
   // POST /api/voice-call-agent
   // Invokes Gemini with `place_immediate_call` FunctionDeclaration and returns the structured functionCall JSON
   app.post('/api/voice-call-agent', async (req, res) => {
