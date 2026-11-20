@@ -7,7 +7,6 @@ import {
   Mic,
   MicOff,
   Radio,
-  Smartphone,
 } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
@@ -41,18 +40,19 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      // Auto-trigger real two-way Internet voice call + live Phone GPS stream to Laptop
-      callEmergencyNumber(emergencyCallManager.getPhoneNumber(), {
-        unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
-        driverId: telemetry.driverId,
-        impactG,
-        knockCount: telemetry.hardwareSensors.knockCount,
-        speedKmh: telemetry.speedKmh,
-        accuracy: telemetry.gps.accuracyM,
-        latitude: telemetry.gps.latitude,
-        longitude: telemetry.gps.longitude,
-        reason: 'CRASH',
-      });
+      if (emergencyCallManager.getState().status === 'idle') {
+        callEmergencyNumber(undefined, {
+          unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
+          driverId: telemetry.driverId,
+          impactG,
+          knockCount: telemetry.hardwareSensors.knockCount,
+          speedKmh: telemetry.speedKmh,
+          accuracy: telemetry.gps.accuracyM,
+          latitude: telemetry.gps.latitude,
+          longitude: telemetry.gps.longitude,
+          reason: 'CRASH',
+        });
+      }
       cabAudio.playEmergencyAlarm();
       if ('vibrate' in navigator) {
         navigator.vibrate([500, 150, 500, 150, 1000]);
@@ -76,8 +76,6 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
     return `${mins}:${secs}`;
   };
 
-  const activePhone = callState.phoneNumber || '82199';
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-5 bg-black/90 backdrop-blur-md overflow-y-auto">
       <div className="w-full max-w-2xl bg-[#1b0507] border-4 border-[#ef4444] rounded-2xl shadow-[0_0_50px_rgba(239,68,68,0.7)] overflow-hidden flex flex-col my-auto">
@@ -89,11 +87,11 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
           <div>
             <span className="text-[11px] font-mono px-3 py-0.5 rounded-full bg-black/40 text-[#4edea3] font-bold tracking-widest uppercase inline-block mb-1">
               {callState.peerConnected
-                ? `PHONE ↔ LAPTOP REAL 2-WAY VOICE + LIVE MAP CONNECTED · ${activePhone}`
-                : `CALLING LAPTOP VIA INTERNET SERVER (2 IPs) · ${activePhone}`}
+                ? 'PHONE ↔ LAPTOP REAL 2-WAY VOICE + LIVE MAP CONNECTED'
+                : 'CALLING LAPTOP CONTROL ROOM VIA INTERNET SERVER (2 IPs)'}
             </span>
             <h1 className="text-lg sm:text-2xl font-headline font-extrabold text-white tracking-tight">
-              EMERGENCY CALLING LAPTOP ({activePhone}) + LIVE GPS MAP
+              EMERGENCY CALLING LAPTOP CONTROL ROOM + LIVE GPS MAP
             </h1>
             <p className="text-xs font-mono text-red-100">
               4-Knock / Sensor Crash Trigger (<strong className="text-white underline">{impactG.toFixed(2)}G</strong>) · Elapsed: {secondsElapsed}s
@@ -103,31 +101,17 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
 
         {/* Real Two-Way Live Voice + Live Phone Location Map Panel */}
         <div className="p-3.5 sm:p-5 space-y-3 font-body">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                cabAudio.playSuccessChime();
-                emergencyCallManager.answerIncomingCall(activePhone);
-              }}
-              className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-[#38bdf8] hover:bg-[#0284c7] text-[#051424] font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
-            >
-              <PhoneIncoming className="w-4 h-4 text-[#051424] shrink-0" />
-              <span>ANSWER ON LAPTOP ({activePhone})</span>
-            </button>
-
-            <a
-              href={`tel:${activePhone}`}
-              onClick={() => {
-                cabAudio.playKeyClick();
-                emergencyCallManager.dialCellularSimCall(activePhone);
-              }}
-              className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
-            >
-              <Smartphone className="w-4 h-4 text-black shrink-0" />
-              <span>DIAL REAL SIM CALL ({activePhone})</span>
-            </a>
-          </div>
+          <button
+            type="button"
+            onClick={() => {
+              cabAudio.playSuccessChime();
+              emergencyCallManager.answerIncomingCall();
+            }}
+            className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-[#38bdf8] hover:bg-[#0284c7] text-[#051424] font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-2xl transition-all cursor-pointer select-none active:scale-95"
+          >
+            <PhoneIncoming className="w-4 h-4 text-[#051424] shrink-0" />
+            <span>ANSWER ON LAPTOP CONTROL ROOM</span>
+          </button>
 
           <div className="p-3 rounded-xl bg-[#071a12] border-2 border-[#10b981] shadow-[0_0_25px_rgba(16,185,129,0.25)] space-y-2.5">
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -140,14 +124,14 @@ export const CrashEmergencyModal: React.FC<CrashEmergencyModalProps> = ({
                     <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#10b981] animate-ping" />
                     <span className="font-mono text-xs font-extrabold uppercase tracking-wider text-[#10b981]">
                       {callState.peerConnected
-                        ? `PHONE ↔ LAPTOP VOICE CONNECTED (${activePhone})`
-                        : `RINGING LAPTOP OVER INTERNET (${activePhone})`}
+                        ? 'PHONE ↔ LAPTOP VOICE CONNECTED'
+                        : 'RINGING LAPTOP OVER INTERNET'}
                     </span>
                   </div>
                   <p className="text-[11px] font-mono text-[#94a3b8]">
                     {callState.peerConnected
                       ? 'Talk on Laptop or Phone — real two-way microphone & speaker audio is live!'
-                      : 'Open app on your Laptop and click "ANSWER ON LAPTOP" (or enable Laptop Auto-Answer)'}
+                      : 'Open app on your Laptop and click "ANSWER INCOMING CALL" (or enable Laptop Auto-Answer)'}
                   </p>
                 </div>
               </div>

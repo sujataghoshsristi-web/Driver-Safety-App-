@@ -687,15 +687,16 @@ export const HardwareSensorsSuiteCard: React.FC<HardwareSensorsSuiteCardProps> =
             {/* Automatic Emergency Action Info */}
             <div className="mb-3 bg-[#161b22] p-2 rounded border border-[#30363d] flex items-center justify-between text-[10px] font-mono">
               <span className="text-[#94a3b8]">
-                FIRE ACTION: CUT RELAY + CALL {emergencyNumber}
+                FIRE ACTION: CUT RELAY + CALL CONTROL ROOM
               </span>
-              <a
-                href={`tel:${emergencyNumber}`}
-                className="text-[#ef4444] hover:underline font-bold flex items-center gap-1"
+              <button
+                type="button"
+                onClick={() => emergencyCallManager.startInstantCall()}
+                className="text-[#ef4444] hover:underline font-bold flex items-center gap-1 cursor-pointer"
               >
                 <PhoneCall className="w-3 h-3" />
                 <span>Call Now</span>
-              </a>
+              </button>
             </div>
           </div>
 

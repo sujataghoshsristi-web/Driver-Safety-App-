@@ -1,25 +1,25 @@
 /**
- * Internet Server + Wi-Fi Cross-IP Two-Way Voice Call & Live Phone GPS Map Engine
+ * Internet Server + Global Cross-IP WSS + WebRTC Two-Way Voice Call & Live Phone GPS Map Engine
  *
- * Works across 2 different IPs (Phone on Mobile Data / Wi-Fi IP #1 <-> Laptop on Internet / Wi-Fi IP #2):
- * 1. Primary Transport: WebRTC (RTCPeerConnection with Google STUN + OpenRelay TURN over port 80/443)
- * 2. Fallback Transport: HTTP Server Live Audio Stream Relay (/api/webrtc/audio) so voice ALWAYS works
- *    through the server even if strict NAT/firewalls block UDP between the 2 IPs!
- * 3. Real-Time Phone GPS Location Stream: Phone streams navigator.geolocation.watchPosition to
- *    /api/webrtc/location so the Laptop sees the Phone's real live location on the Map!
+ * Works across ANY 2 different IPs (Phone on Mobile Data / Wi-Fi IP #1 <-> Laptop on Internet / Wi-Fi IP #2)
+ * and across ANY app URLs (ais-dev, ais-pre, Android APK, GitHub build, localhost):
+ * 1. Global Real-Time WSS Voice & GPS Bus (crossIpVoiceBus over MQTT-over-WSS ports 8084/8884)
+ * 2. Express HTTP Server Live Audio & GPS Relay (/api/webrtc/audio & /api/webrtc/location)
+ * 3. Direct WebRTC P2P + TURN (STUN + OpenRelay TURN over port 80/443 TCP & UDP)
  */
 
 import { espManager } from './espManager';
+import { crossIpVoiceBus, CrossIpBusPacket } from './crossIpVoiceBus';
 
 const STORAGE_KEY = 'drivelock_emergency_phone_number';
 const SERVER_URL_STORAGE_KEY = 'drivelock_call_server_url';
 const AUTO_ANSWER_STORAGE_KEY = 'drivelock_laptop_auto_answer';
 
-export const DEFAULT_EMERGENCY_PHONE_NUMBER = '82199';
+export const GLOBAL_DISPATCH_ROOM = 'DRIVELOCK_DISPATCH';
+export const DEFAULT_EMERGENCY_PHONE_NUMBER = 'DISPATCH';
 export const DEFAULT_CLOUD_SERVER_URL =
   'https://ais-pre-x24utjildnuq7js2diaf2v-1003004681042.asia-southeast1.run.app';
 
-// Cross-IP STUN + TURN configuration so Phone (IP #1) and Laptop (IP #2) connect across any network
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -44,14 +44,6 @@ const RTC_CONFIG: RTCConfiguration = {
 };
 
 const getSavedEmergencyNumber = (): string => {
-  if (typeof window !== 'undefined') {
-    try {
-      const saved = window.localStorage.getItem(STORAGE_KEY);
-      if (saved && saved.trim().length > 0) {
-        return saved.trim();
-      }
-    } catch (e) {}
-  }
   return DEFAULT_EMERGENCY_PHONE_NUMBER;
 };
 
@@ -62,12 +54,13 @@ const getDefaultServerBaseUrl = (): string => {
       if (saved !== null && saved.trim().length > 0) {
         return saved.trim().replace(/\/+$/, '');
       }
-      // If running inside Capacitor Android APK (https://localhost), point to the Cloud Internet Server automatically
-      if (
+      const isNativeApk =
         window.location.protocol === 'capacitor:' ||
-        window.location.hostname === 'localhost' ||
-        window.location.hostname === '127.0.0.1'
-      ) {
+        Boolean((window as any).Capacitor?.isNativePlatform?.()) ||
+        (window.location.hostname === 'localhost' &&
+          !window.location.port &&
+          /Android/i.test(navigator.userAgent || ''));
+      if (isNativeApk) {
         return DEFAULT_CLOUD_SERVER_URL;
       }
     } catch (e) {}
@@ -78,13 +71,19 @@ const getDefaultServerBaseUrl = (): string => {
 const getSavedAutoAnswer = (): boolean => {
   if (typeof window !== 'undefined') {
     try {
-      return window.localStorage.getItem(AUTO_ANSWER_STORAGE_KEY) === 'true';
+      const saved = window.localStorage.getItem(AUTO_ANSWER_STORAGE_KEY);
+      if (saved === 'false') return false;
+      if (saved === 'true') return true;
+      const ua = navigator.userAgent || '';
+      if (!/Android|iPhone|iPod|Mobile/i.test(ua)) {
+        return true;
+      }
     } catch (e) {}
   }
   return false;
 };
 
-export let EMERGENCY_PHONE_NUMBER = getSavedEmergencyNumber();
+export let EMERGENCY_PHONE_NUMBER = DEFAULT_EMERGENCY_PHONE_NUMBER;
 
 export interface EmergencyCallContext {
   unitNumber?: string;
@@ -137,10 +136,10 @@ export interface EmergencyCallState {
   micMuted: boolean;
   isMuted: boolean;
   speakerphoneOn: boolean;
-  micLevel: number; // 0 - 100 local microphone level
-  remoteVoiceLevel: number; // 0 - 100 other person's live voice level
-  peerConnected: boolean; // true when two-way voice between Phone and Laptop is active
-  incomingCallAvailable: boolean; // true when Phone is calling Laptop over the Internet/Server
+  micLevel: number;
+  remoteVoiceLevel: number;
+  peerConnected: boolean;
+  incomingCallAvailable: boolean;
   incomingCallerInfo: string;
   remoteLocation: RemotePhoneLocation | null;
   locationTrail: Array<{ lat: number; lon: number; ts: number }>;
@@ -159,7 +158,7 @@ class EmergencyCallManager {
     transportMode: 'connecting',
     serverUrl: getDefaultServerBaseUrl(),
     autoAnswerOnLaptop: getSavedAutoAnswer(),
-    phoneNumber: getSavedEmergencyNumber(),
+    phoneNumber: DEFAULT_EMERGENCY_PHONE_NUMBER,
     durationSeconds: 0,
     micActive: false,
     micMuted: false,
@@ -178,8 +177,10 @@ class EmergencyCallManager {
     lastFunctionCall: null,
   };
 
+  private readonly senderId: string = crossIpVoiceBus.getSenderId();
   private listeners: Set<CallStateListener> = new Set();
   private audioCtx: AudioContext | null = null;
+  private masterSpeakerGain: GainNode | null = null;
   private ringTimer: number | null = null;
   private incomingRingTimer: number | null = null;
   private durationInterval: number | null = null;
@@ -188,8 +189,29 @@ class EmergencyCallManager {
   private incomingWatchInterval: number | null = null;
   private gpsWatchId: number | null = null;
   private audioRelayPullInterval: number | null = null;
-  private mediaRecorder: MediaRecorder | null = null;
+  private pcmProcessorNode: ScriptProcessorNode | null = null;
+  private pcmSourceNode: MediaStreamAudioSourceNode | null = null;
+  private pcmZeroGainNode: GainNode | null = null;
+  private sampleAccumulator: number[] = [];
+  private httpPendingPackets: Array<{
+    packetId: string;
+    pcm16: string;
+    role: 'caller' | 'callee';
+  }> = [];
+  private scriptProcessorActive: boolean = false;
+  private micOpenTimeMs: number = 0;
+  private lastScriptProcessorMs: number = 0;
   private lastPlayedAudioSeq: number = 0;
+  private nextPlayTime: number = 0;
+  private lastRelayVoiceTimestamp: number = 0;
+  private lastWssAudioMs: number = 0;
+  private isPullingAudio: boolean = false;
+  private isPostingAudio: boolean = false;
+  private isStartingOrAnswering: boolean = false;
+  private isPrewarmingMic: boolean = false;
+  private deviceMode: 'phone' | 'laptop' = 'phone';
+  private lastCallInitiatedByMeAt: number = 0;
+  private playedPacketIds: Set<string> = new Set();
 
   private micStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
@@ -198,16 +220,80 @@ class EmergencyCallManager {
   private localAnalyser: AnalyserNode | null = null;
   private remoteAnalyser: AnalyserNode | null = null;
   private addedCandidateCount: number = 0;
-  private webrtcDirectConnected: boolean = false;
   private lastContext?: EmergencyCallContext;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // Poll server every 1.2s so the Laptop immediately detects an incoming call + GPS from the Phone
+      const ua = navigator.userAgent || '';
+      const platform = (navigator as any).userAgentData?.platform || navigator.platform || '';
+      if (!/Android|iPhone|iPod|Mobile/i.test(ua) && /Win|Mac|Linux x86|CrOS/i.test(platform)) {
+        this.deviceMode = 'laptop';
+      }
+
+      crossIpVoiceBus.setRoomId(GLOBAL_DISPATCH_ROOM);
+      crossIpVoiceBus.subscribe((packet) => {
+        this.handleCrossIpPacket(packet);
+      });
+
+      const unlockAudio = () => {
+        try {
+          const ctx = this.ensureAudioContext();
+          if (ctx && ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+          }
+          if (this.deviceMode === 'laptop' && !this.micStream && !this.isPrewarmingMic) {
+            this.prewarmMicrophone().catch(() => {});
+          }
+        } catch (e) {}
+      };
+      window.addEventListener('pointerdown', unlockAudio, { passive: true });
+      window.addEventListener('touchstart', unlockAudio, { passive: true });
+      window.addEventListener('keydown', unlockAudio, { passive: true });
+
       this.incomingWatchInterval = window.setInterval(() => {
         this.checkForIncomingCall();
-      }, 1200);
+      }, 750);
     }
+  }
+
+  public setDeviceMode(mode: 'phone' | 'laptop') {
+    this.deviceMode = mode;
+    if (mode === 'phone' && this.state.incomingCallAvailable) {
+      this.stopIncomingRingtone();
+      this.state.incomingCallAvailable = false;
+      this.state.incomingCallerInfo = '';
+      this.emit();
+    } else if (mode === 'laptop') {
+      this.prewarmMicrophone().catch(() => {});
+    }
+  }
+
+  public async prewarmMicrophone(): Promise<MediaStream | null> {
+    if (this.micStream && this.micStream.getAudioTracks().some((t) => t.readyState === 'live')) {
+      const ctx = this.ensureAudioContext();
+      if (ctx && ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      return this.micStream;
+    }
+    if (this.isPrewarmingMic) return null;
+    this.isPrewarmingMic = true;
+    try {
+      return await this.openLocalMicrophone();
+    } finally {
+      this.isPrewarmingMic = false;
+    }
+  }
+
+  private rememberPlayedPacket(packetId?: string): boolean {
+    if (!packetId) return false;
+    if (this.playedPacketIds.has(packetId)) return true;
+    this.playedPacketIds.add(packetId);
+    if (this.playedPacketIds.size > 500) {
+      const oldest = this.playedPacketIds.values().next().value;
+      if (oldest) this.playedPacketIds.delete(oldest);
+    }
+    return false;
   }
 
   private apiUrl(path: string): string {
@@ -215,23 +301,154 @@ class EmergencyCallManager {
     return base ? `${base}${path}` : path;
   }
 
+  private ensureAudioContext(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!this.audioCtx || this.audioCtx.state === 'closed') {
+        this.audioCtx = new AudioContextClass();
+        this.masterSpeakerGain = null;
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume().catch(() => {});
+      }
+      if (!this.masterSpeakerGain && this.audioCtx) {
+        this.masterSpeakerGain = this.audioCtx.createGain();
+        this.masterSpeakerGain.gain.value = 1.85;
+        this.masterSpeakerGain.connect(this.audioCtx.destination);
+      }
+      return this.audioCtx;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Handles real-time packets arriving over the Global Cross-IP WSS Bus (MQTT-over-WSS)
+   */
+  private handleCrossIpPacket(packet: CrossIpBusPacket) {
+    if (!packet || packet.senderId === this.senderId) return;
+
+    if (packet.location && (packet.location.latitude || packet.location.longitude)) {
+      this.state.remoteLocation = packet.location;
+      const lastPt = this.state.locationTrail[this.state.locationTrail.length - 1];
+      if (
+        !lastPt ||
+        Math.abs(lastPt.lat - packet.location.latitude) > 0.00002 ||
+        Math.abs(lastPt.lon - packet.location.longitude) > 0.00002
+      ) {
+        this.state.locationTrail = [
+          ...this.state.locationTrail,
+          {
+            lat: packet.location.latitude,
+            lon: packet.location.longitude,
+            ts: Date.now(),
+          },
+        ].slice(-40);
+      }
+    }
+
+    if (packet.type === 'hangup') {
+      if (this.state.status !== 'idle') {
+        this.endCall(false);
+      } else if (this.state.incomingCallAvailable) {
+        this.stopIncomingRingtone();
+        this.state.incomingCallAvailable = false;
+        this.state.incomingCallerInfo = '';
+        this.emit();
+      }
+      return;
+    }
+
+    if (packet.type === 'ring') {
+      if (this.state.status === 'ringing' || this.state.status === 'connected') {
+        this.onPeerVoiceConnected();
+        crossIpVoiceBus.publish({
+          type: 'answer',
+          role: 'callee',
+        });
+        return;
+      }
+
+      // Never show Incoming Call popup on the Phone Cab Docker or the device that just initiated the call
+      if (
+        this.deviceMode === 'phone' ||
+        Date.now() - this.lastCallInitiatedByMeAt < 12000
+      ) {
+        return;
+      }
+
+      const loc = packet.location || this.state.remoteLocation;
+      const callerUnit = loc?.unitNumber || 'PHONE CAB UNIT';
+      const callerGps =
+        loc?.latitude && loc?.longitude
+          ? `${Number(loc.latitude).toFixed(5)}, ${Number(loc.longitude).toFixed(5)}`
+          : '';
+      this.state.incomingCallerInfo = `Incoming Emergency Call from ${callerUnit}${
+        callerGps ? ` (GPS: ${callerGps})` : ''
+      }`;
+      if (!this.state.incomingCallAvailable) {
+        this.state.incomingCallAvailable = true;
+        this.startIncomingRingtone();
+        if (this.state.autoAnswerOnLaptop) {
+          this.answerIncomingCall();
+          return;
+        }
+      }
+      this.emit();
+      return;
+    }
+
+    if (packet.type === 'answer') {
+      if (this.state.status === 'ringing') {
+        this.onPeerVoiceConnected();
+      }
+      return;
+    }
+
+    if (packet.type === 'audio' && packet.pcm16) {
+      this.lastWssAudioMs = Date.now();
+      if (this.state.status === 'ringing') {
+        this.onPeerVoiceConnected();
+        crossIpVoiceBus.publish({
+          type: 'answer',
+          role: 'callee',
+        });
+      } else if (
+        this.state.status === 'idle' &&
+        this.deviceMode === 'laptop' &&
+        Date.now() - this.lastCallInitiatedByMeAt >= 12000
+      ) {
+        if (this.state.autoAnswerOnLaptop) {
+          this.answerIncomingCall();
+        } else if (!this.state.incomingCallAvailable) {
+          this.state.incomingCallAvailable = true;
+          this.state.incomingCallerInfo =
+            'Incoming Live Emergency Voice — Click Answer to Talk!';
+          this.startIncomingRingtone();
+          this.emit();
+        }
+      }
+
+      if (this.state.status === 'connected' || this.state.status === 'ringing') {
+        if (!this.rememberPlayedPacket(packet.id)) {
+          this.playIncomingPcm16(packet.pcm16, packet.sampleRate || 8000);
+        }
+      }
+    }
+  }
+
   public getState(): EmergencyCallState {
     return this.state;
   }
 
   public getPhoneNumber(): string {
-    return this.state.phoneNumber;
+    return DEFAULT_EMERGENCY_PHONE_NUMBER;
   }
 
-  public setPhoneNumber(newNumber: string) {
-    const cleaned = newNumber.replace(/[^0-9+*#]/g, '').trim() || DEFAULT_EMERGENCY_PHONE_NUMBER;
-    EMERGENCY_PHONE_NUMBER = cleaned;
-    this.state.phoneNumber = cleaned;
-    if (typeof window !== 'undefined') {
-      try {
-        window.localStorage.setItem(STORAGE_KEY, cleaned);
-      } catch (e) {}
-    }
+  public setPhoneNumber(_newNumber: string) {
+    // Universal dispatch room used automatically — no number matching required
+    this.state.phoneNumber = DEFAULT_EMERGENCY_PHONE_NUMBER;
     this.emit();
   }
 
@@ -262,9 +479,6 @@ class EmergencyCallManager {
 
   private lastIdleLocationPushMs: number = 0;
 
-  /**
-   * Called by Phone whenever its GPS coordinates update so the Laptop Control Room map tracks the Phone live.
-   */
   public updateCallerLiveLocation(loc: {
     latitude: number;
     longitude: number;
@@ -278,20 +492,27 @@ class EmergencyCallManager {
   }) {
     if (!loc.latitude && !loc.longitude) return;
     const now = Date.now();
-    this.state.remoteLocation = {
+    const updatedLoc: RemotePhoneLocation = {
       ...this.state.remoteLocation,
       ...loc,
       updatedAt: now,
     };
-    const isCalling = this.state.role === 'caller' && this.state.status !== 'idle';
+    this.state.remoteLocation = updatedLoc;
+
+    const isCalling = this.state.status !== 'idle';
     if (isCalling || now - this.lastIdleLocationPushMs >= 2000) {
       this.lastIdleLocationPushMs = now;
-      const activeNum = this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
+      crossIpVoiceBus.publish({
+        type: 'gps',
+        role: this.state.role === 'callee' ? 'callee' : 'caller',
+        location: updatedLoc,
+      });
       fetch(this.apiUrl('/api/webrtc/location'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          roomId: activeNum,
+          roomId: GLOBAL_DISPATCH_ROOM,
+          senderId: this.senderId,
           ...loc,
         }),
       }).catch(() => {});
@@ -325,60 +546,16 @@ class EmergencyCallManager {
   }
 
   public triggerNativeAndroidBridgeIfAvailable(
-    targetNumber?: string,
-    fnPayload?: PlaceImmediateCallPayload
+    _targetNumber?: string,
+    _fnPayload?: PlaceImmediateCallPayload
   ): boolean {
-    const cleanNum = (targetNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER).replace(
-      /[^0-9+*#]/g,
-      ''
-    );
-
-    if (typeof window === 'undefined') return false;
-
-    const payload: PlaceImmediateCallPayload = fnPayload || {
-      functionCall: {
-        name: 'place_immediate_call',
-        args: {
-          target: cleanNum,
-        },
-      },
-      resolvedPhoneNumber: cleanNum,
-      androidIntentJava: `startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:${cleanNum}")));`,
-    };
-
-    try {
-      const win = window as any;
-      if (win.Android && typeof win.Android.placeImmediateCall === 'function') {
-        win.Android.placeImmediateCall(JSON.stringify(payload));
-        return true;
-      }
-      if (win.Android && typeof win.Android.callNow === 'function') {
-        win.Android.callNow(cleanNum);
-        return true;
-      }
-      if (win.Android && typeof win.Android.callPhone === 'function') {
-        win.Android.callPhone(cleanNum);
-        return true;
-      }
-    } catch (e) {}
-
     return false;
   }
 
-  public dialCellularSimCall(targetNumber?: string) {
-    const cleanNum = (targetNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER).replace(
-      /[^0-9+*#]/g,
-      ''
-    );
-    if (this.triggerNativeAndroidBridgeIfAvailable(cleanNum)) {
-      return;
-    }
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-      const a = document.createElement('a');
-      a.href = `tel:${cleanNum}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+  public dialCellularSimCall(_targetNumber?: string) {
+    // SIM card calls removed; use 2-way internet voice dispatch directly
+    if (this.state.status === 'idle') {
+      this.startInstantCall(GLOBAL_DISPATCH_ROOM, this.lastContext);
     }
   }
 
@@ -386,7 +563,7 @@ class EmergencyCallManager {
     utterance: string,
     context?: EmergencyCallContext
   ): Promise<PlaceImmediateCallPayload> {
-    const defaultNum = this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
+    const defaultNum = DEFAULT_EMERGENCY_PHONE_NUMBER;
     try {
       const res = await fetch(this.apiUrl('/api/voice-call-agent'), {
         method: 'POST',
@@ -398,196 +575,240 @@ class EmergencyCallManager {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: PlaceImmediateCallPayload = await res.json();
-      const targetNum = data.resolvedPhoneNumber || data.functionCall?.args?.target || defaultNum;
       this.state.lastFunctionCall = data;
-      await this.startInstantCall(targetNum, context, data);
+      await this.startInstantCall(GLOBAL_DISPATCH_ROOM, context, data);
       return data;
     } catch (e) {
-      const match = utterance.match(/[+0-9][0-9\-\s().+*#]{1,20}/);
-      const extracted = match ? match[0].replace(/[^0-9+*#]/g, '') : defaultNum;
       const fallbackPayload: PlaceImmediateCallPayload = {
         functionCall: {
           name: 'place_immediate_call',
           args: {
-            target: extracted,
+            target: 'Emergency Dispatch',
           },
         },
-        resolvedPhoneNumber: extracted,
-        androidIntentJava: `startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:${extracted}")));`,
+        resolvedPhoneNumber: defaultNum,
       };
       this.state.lastFunctionCall = fallbackPayload;
-      await this.startInstantCall(extracted, context, fallbackPayload);
+      await this.startInstantCall(GLOBAL_DISPATCH_ROOM, context, fallbackPayload);
       return fallbackPayload;
     }
   }
 
   /**
-   * Starts a REAL Internet/Wi-Fi Call from the Phone to the Laptop (over 2 IPs) + streams real Phone GPS!
+   * Starts a REAL Internet/Wi-Fi Call across 2 IPs + streams real Phone GPS & 2-way voice immediately!
    */
   public async startInstantCall(
-    phoneNumber?: string,
+    _phoneNumber?: string,
     context?: EmergencyCallContext,
-    explicitPayload?: PlaceImmediateCallPayload
-  ) {
-    const activeNum =
-      (phoneNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER)
-        .replace(/[^0-9+*#]/g, '')
-        .trim() || DEFAULT_EMERGENCY_PHONE_NUMBER;
-
-    this.lastContext = context;
-
-    const fnPayload: PlaceImmediateCallPayload = explicitPayload || {
-      functionCall: {
-        name: 'place_immediate_call',
-        args: {
-          target: activeNum,
-        },
-      },
-      resolvedPhoneNumber: activeNum,
-      androidIntentJava: `startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:${activeNum}")));`,
-    };
-    this.state.lastFunctionCall = fnPayload;
-
-    // Notify ESP32 hardware over Serial/BLE if connected
-    try {
-      espManager.sendCommand(`CALL:${activeNum}`);
-    } catch (e) {}
-
-    if (this.state.status === 'ringing' || this.state.status === 'connected') {
+    explicitPayload?: PlaceImmediateCallPayload,
+    skipRoomCheck: boolean = false
+  ): Promise<void> {
+    if (
+      this.isStartingOrAnswering ||
+      this.state.status === 'ringing' ||
+      this.state.status === 'connected'
+    ) {
       return;
     }
 
-    this.cleanupSession(false);
+    if (!skipRoomCheck && this.state.incomingCallAvailable) {
+      return this.answerIncomingCall(GLOBAL_DISPATCH_ROOM, true);
+    }
 
-    const unit = context?.unitNumber || 'AUTO-101';
-    const lat = context?.latitude ?? 37.7749;
-    const lon = context?.longitude ?? -122.4194;
-
-    const initialLoc: RemotePhoneLocation = {
-      latitude: lat,
-      longitude: lon,
-      accuracy: context?.accuracy || 10,
-      speedKmh: context?.speedKmh || 0,
-      impactG: context?.impactG || 4.2,
-      knockCount: context?.knockCount || 4,
-      unitNumber: unit,
-      driverId: context?.driverId || 'DRV-8841',
-      reason: context?.reason || 'CRASH',
-      updatedAt: Date.now(),
-    };
-
-    this.state = {
-      ...this.state,
-      status: 'ringing',
-      role: 'caller',
-      transportMode: 'connecting',
-      phoneNumber: activeNum,
-      durationSeconds: 0,
-      micActive: false,
-      micMuted: false,
-      isMuted: false,
-      speakerphoneOn: true,
-      micLevel: 0,
-      remoteVoiceLevel: 0,
-      peerConnected: false,
-      incomingCallAvailable: false,
-      remoteLocation: initialLoc,
-      locationTrail: [{ lat, lon, ts: Date.now() }],
-      dispatcherSpeaking: false,
-      dispatchTranscript: `Calling Laptop Dispatch (${activeNum}) over Internet Server & streaming live Phone GPS (${lat.toFixed(5)}, ${lon.toFixed(5)})...`,
-      lastTranscript: `RINGING LAPTOP (${activeNum}) @ GPS ${lat.toFixed(5)}, ${lon.toFixed(5)}`,
-      lastFunctionCall: fnPayload,
-    };
-    this.emit();
-
-    // Start outbound phone ringback tone until Laptop answers
-    this.startRingbackTone();
-
-    // Start real-time Phone GPS watcher so Laptop sees exact Phone location moving live
-    this.startPhoneGpsStreaming(activeNum, initialLoc);
-
+    this.isStartingOrAnswering = true;
     try {
+      this.ensureAudioContext();
+      this.lastContext = context;
+
+      const fnPayload: PlaceImmediateCallPayload = explicitPayload || {
+        functionCall: {
+          name: 'place_immediate_call',
+          args: {
+            target: 'DISPATCH',
+          },
+        },
+        resolvedPhoneNumber: DEFAULT_EMERGENCY_PHONE_NUMBER,
+      };
+      this.state.lastFunctionCall = fnPayload;
+
+      try {
+        espManager.sendCommand('CALL:DISPATCH');
+      } catch (e) {}
+
+      this.cleanupSession(false);
+
+      const unit = context?.unitNumber || 'AUTO-101';
+      const lat = context?.latitude ?? this.state.remoteLocation?.latitude ?? 37.7749;
+      const lon = context?.longitude ?? this.state.remoteLocation?.longitude ?? -122.4194;
+
+      const initialLoc: RemotePhoneLocation = {
+        latitude: lat,
+        longitude: lon,
+        accuracy: context?.accuracy || 10,
+        speedKmh: context?.speedKmh || 0,
+        impactG: context?.impactG || 4.2,
+        knockCount: context?.knockCount || 4,
+        unitNumber: unit,
+        driverId: context?.driverId || 'DRV-8841',
+        reason: context?.reason || 'CRASH',
+        updatedAt: Date.now(),
+      };
+
+      // Set status = 'ringing' SYNCHRONOUSLY before any await so concurrent calls cannot re-enter!
+      this.lastCallInitiatedByMeAt = Date.now();
+      this.stopIncomingRingtone();
+      this.state = {
+        ...this.state,
+        status: 'ringing',
+        role: 'caller',
+        transportMode: 'server-relay',
+        phoneNumber: DEFAULT_EMERGENCY_PHONE_NUMBER,
+        durationSeconds: 0,
+        micActive: Boolean(this.micStream),
+        micMuted: false,
+        isMuted: false,
+        speakerphoneOn: true,
+        micLevel: 0,
+        remoteVoiceLevel: 0,
+        peerConnected: false,
+        incomingCallAvailable: false,
+        incomingCallerInfo: '',
+        remoteLocation: initialLoc,
+        locationTrail: [{ lat, lon, ts: Date.now() }],
+        dispatcherSpeaking: false,
+        dispatchTranscript: `Calling Control Room over Cross-IP Server & streaming live GPS (${lat.toFixed(5)}, ${lon.toFixed(5)})...`,
+        lastTranscript: `RINGING CONTROL ROOM @ GPS ${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+        lastFunctionCall: fnPayload,
+      };
+      this.emit();
+
+      // Broadcast ring packet over Global Cross-IP WSS Bus immediately
+      crossIpVoiceBus.publish({
+        type: 'ring',
+        role: 'caller',
+        location: initialLoc,
+      });
+
+      this.startRingbackTone();
+      this.startPhoneGpsStreaming(GLOBAL_DISPATCH_ROOM, initialLoc);
+
       const stream = await this.openLocalMicrophone();
 
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      this.peerConnection = pc;
-      this.addedCandidateCount = 0;
-      this.webrtcDirectConnected = false;
+      // Start 2-way audio relay IMMEDIATELY
+      this.startServerAudioRelay(GLOBAL_DISPATCH_ROOM, 'caller', 0);
 
-      if (stream) {
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-      } else {
-        pc.addTransceiver('audio', { direction: 'sendrecv' });
+      let localOffer: RTCSessionDescriptionInit | null = null;
+      try {
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        this.peerConnection = pc;
+        this.addedCandidateCount = 0;
+
+        if (stream) {
+          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+        } else {
+          pc.addTransceiver('audio', { direction: 'sendrecv' });
+        }
+
+        pc.ontrack = (event) => {
+          const [remoteMediaStream] = event.streams;
+          if (remoteMediaStream) {
+            this.attachRemoteAudioStream(remoteMediaStream);
+          }
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            fetch(this.apiUrl('/api/webrtc/candidate'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                roomId: GLOBAL_DISPATCH_ROOM,
+                role: 'caller',
+                candidate: event.candidate.toJSON(),
+              }),
+            }).catch(() => {});
+          }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          const iceState = pc.iceConnectionState;
+          if (iceState === 'connected' || iceState === 'completed') {
+            this.onPeerVoiceConnected();
+          }
+        };
+
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+        });
+        await pc.setLocalDescription(offer);
+        localOffer = pc.localDescription;
+      } catch (e) {
+        localOffer = { type: 'offer', sdp: '' };
       }
 
-      pc.ontrack = (event) => {
-        const [remoteMediaStream] = event.streams;
-        if (remoteMediaStream) {
-          this.webrtcDirectConnected = true;
-          this.state.transportMode = 'webrtc-p2p';
-          this.attachRemoteAudioStream(remoteMediaStream);
+      try {
+        const offerRes = await fetch(this.apiUrl('/api/webrtc/offer'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomId: GLOBAL_DISPATCH_ROOM,
+            senderId: this.senderId,
+            offer: localOffer || { type: 'offer', sdp: '' },
+            callerContext: initialLoc,
+          }),
+        });
+        if (offerRes.ok) {
+          const offerData = await offerRes.json();
+          if (offerData?.room?.status === 'connected') {
+            this.onPeerVoiceConnected();
+          }
         }
-      };
+      } catch (e) {}
 
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          fetch(this.apiUrl('/api/webrtc/candidate'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              roomId: activeNum,
-              role: 'caller',
-              candidate: event.candidate.toJSON(),
-            }),
-          }).catch(() => {});
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
-          this.webrtcDirectConnected = true;
-          this.state.transportMode = 'webrtc-p2p';
-          this.onPeerVoiceConnected();
-        }
-      };
-
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-      });
-      await pc.setLocalDescription(offer);
-
-      await fetch(this.apiUrl('/api/webrtc/offer'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roomId: activeNum,
-          offer: pc.localDescription,
-          callerContext: initialLoc,
-        }),
-      });
-
-      // Poll signaling server for Laptop's Answer, ICE candidates, and live status
+      // Poll signaling server & broadcast WSS ring heartbeat until connected
       this.signalPollInterval = window.setInterval(async () => {
-        if (!this.peerConnection || this.state.role !== 'caller') return;
+        if (this.state.status === 'idle') return;
+
+        if (this.state.status === 'ringing') {
+          crossIpVoiceBus.publish({
+            type: 'ring',
+            role: 'caller',
+            location: this.state.remoteLocation || initialLoc,
+          });
+        }
+
         try {
           const res = await fetch(
-            this.apiUrl(`/api/webrtc/room/${encodeURIComponent(activeNum)}`)
+            this.apiUrl(`/api/webrtc/room/${GLOBAL_DISPATCH_ROOM}`)
           );
           if (!res.ok) return;
           const room = await res.json();
-          if (room.status === 'idle') {
-            this.endCall(false);
-            return;
+
+          if (room.liveLocation && room.liveLocation.updatedAt) {
+            this.state.remoteLocation = room.liveLocation;
           }
 
-          if (room.answer && !this.peerConnection.currentRemoteDescription) {
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(room.answer));
-            this.onPeerVoiceConnected();
-            // Start Server Audio Relay in parallel so even across 2 strict-NAT IPs, voice works 100%!
-            this.startServerAudioRelay(activeNum, 'caller');
+          const isAnswered = room.status === 'connected' || Boolean(room.answer);
+          if (isAnswered) {
+            if (
+              this.peerConnection &&
+              room.answer &&
+              room.answer.sdp &&
+              !this.peerConnection.currentRemoteDescription
+            ) {
+              try {
+                await this.peerConnection.setRemoteDescription(
+                  new RTCSessionDescription(room.answer)
+                );
+              } catch (e) {}
+            }
+            if (this.state.status !== 'connected') {
+              this.onPeerVoiceConnected();
+            }
           }
 
           if (
+            this.peerConnection &&
             this.peerConnection.currentRemoteDescription &&
             Array.isArray(room.calleeCandidates)
           ) {
@@ -600,136 +821,168 @@ class EmergencyCallManager {
             }
           }
         } catch (e) {}
-      }, 750);
-    } catch (err) {
-      this.state.dispatchTranscript = `Calling Laptop (${activeNum})... Allow microphone access for two-way live voice.`;
-      this.emit();
+      }, 700);
+    } finally {
+      this.isStartingOrAnswering = false;
     }
   }
 
   /**
-   * Answers the Phone's Emergency Call on the Laptop (over Internet Server / 2 IPs or Wi-Fi)
-   * and streams the Phone's real GPS location + two-way live microphone voice!
+   * Answers the Emergency Call on Laptop or Phone across any 2 IPs and starts 2-way voice immediately!
    */
-  public async answerIncomingCall(targetRoomNumber?: string) {
-    const activeNum =
-      (targetRoomNumber || this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER)
-        .replace(/[^0-9+*#]/g, '')
-        .trim() || DEFAULT_EMERGENCY_PHONE_NUMBER;
+  public async answerIncomingCall(
+    _targetRoomNumber?: string,
+    _skipFallbackStart: boolean = false
+  ): Promise<void> {
+    if (this.isStartingOrAnswering || this.state.status === 'connected') {
+      return;
+    }
 
-    this.stopIncomingRingtone();
-    this.cleanupSession(false);
-
-    try {
-      const res = await fetch(this.apiUrl(`/api/webrtc/room/${encodeURIComponent(activeNum)}`));
-      if (!res.ok) return;
-      const room = await res.json();
-      if (!room || !room.offer) {
-        this.state.incomingCallAvailable = false;
-        this.emit();
-        return;
-      }
-
-      if (room.liveLocation) {
-        this.state.remoteLocation = room.liveLocation;
-      }
-      if (Array.isArray(room.locationTrail)) {
-        this.state.locationTrail = room.locationTrail;
-      }
-
-      const stream = await this.openLocalMicrophone();
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      this.peerConnection = pc;
-      this.addedCandidateCount = 0;
-      this.webrtcDirectConnected = false;
-
-      if (stream) {
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-      } else {
-        pc.addTransceiver('audio', { direction: 'sendrecv' });
-      }
-
-      pc.ontrack = (event) => {
-        const [remoteMediaStream] = event.streams;
-        if (remoteMediaStream) {
-          this.webrtcDirectConnected = true;
-          this.state.transportMode = 'webrtc-p2p';
-          this.attachRemoteAudioStream(remoteMediaStream);
-        }
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          fetch(this.apiUrl('/api/webrtc/candidate'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              roomId: activeNum,
-              role: 'callee',
-              candidate: event.candidate.toJSON(),
-            }),
-          }).catch(() => {});
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
-          this.webrtcDirectConnected = true;
-          this.state.transportMode = 'webrtc-p2p';
-          this.onPeerVoiceConnected();
-        }
-      };
-
-      await pc.setRemoteDescription(new RTCSessionDescription(room.offer));
-
-      if (Array.isArray(room.callerCandidates)) {
-        for (const cand of room.callerCandidates) {
-          this.addedCandidateCount++;
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
-          } catch (e) {}
-        }
-      }
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      await fetch(this.apiUrl('/api/webrtc/answer'), {
+    // If we were already ringing as caller, simply transition to connected without tearing down mic!
+    if (this.state.status === 'ringing') {
+      this.onPeerVoiceConnected();
+      crossIpVoiceBus.publish({
+        type: 'answer',
+        role: 'callee',
+      });
+      fetch(this.apiUrl('/api/webrtc/answer'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          roomId: activeNum,
-          answer: pc.localDescription,
+          roomId: GLOBAL_DISPATCH_ROOM,
+          senderId: this.senderId,
+          answer: { type: 'answer', sdp: '' },
         }),
-      });
+      }).catch(() => {});
+      return;
+    }
 
+    this.isStartingOrAnswering = true;
+    try {
+      this.ensureAudioContext();
+      this.stopIncomingRingtone();
+      this.cleanupSession(false);
+
+      // Mark status = 'connected' SYNCHRONOUSLY before any await to prevent re-entrancy!
       this.state.role = 'callee';
       this.state.incomingCallAvailable = false;
       this.onPeerVoiceConnected();
 
-      // Start Server Audio Relay in parallel for guaranteed cross-IP voice delivery
-      this.startServerAudioRelay(activeNum, 'callee');
+      // Immediately notify caller over Global WSS Bus that we answered!
+      crossIpVoiceBus.publish({
+        type: 'answer',
+        role: 'callee',
+      });
 
-      // Poll for new Phone ICE candidates + live Phone GPS coordinates every 750ms
+      const stream = await this.openLocalMicrophone();
+
+      let room: any = null;
+      try {
+        const res = await fetch(this.apiUrl(`/api/webrtc/room/${GLOBAL_DISPATCH_ROOM}`));
+        if (res.ok) {
+          room = await res.json();
+        }
+      } catch (e) {}
+
+      if (room?.liveLocation) {
+        this.state.remoteLocation = room.liveLocation;
+      }
+      if (Array.isArray(room?.locationTrail) && room.locationTrail.length > 0) {
+        this.state.locationTrail = room.locationTrail;
+      }
+
+      let localAnswer: RTCSessionDescriptionInit | null = null;
+
+      if (room?.offer && room.offer.sdp) {
+        try {
+          const pc = new RTCPeerConnection(RTC_CONFIG);
+          this.peerConnection = pc;
+          this.addedCandidateCount = 0;
+
+          if (stream) {
+            stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+          } else {
+            pc.addTransceiver('audio', { direction: 'sendrecv' });
+          }
+
+          pc.ontrack = (event) => {
+            const [remoteMediaStream] = event.streams;
+            if (remoteMediaStream) {
+              this.attachRemoteAudioStream(remoteMediaStream);
+            }
+          };
+
+          pc.onicecandidate = (event) => {
+            if (event.candidate) {
+              fetch(this.apiUrl('/api/webrtc/candidate'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  roomId: GLOBAL_DISPATCH_ROOM,
+                  role: 'callee',
+                  candidate: event.candidate.toJSON(),
+                }),
+              }).catch(() => {});
+            }
+          };
+
+          await pc.setRemoteDescription(new RTCSessionDescription(room.offer));
+
+          if (Array.isArray(room.callerCandidates)) {
+            for (const cand of room.callerCandidates) {
+              this.addedCandidateCount++;
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(cand));
+              } catch (e) {}
+            }
+          }
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          localAnswer = pc.localDescription;
+        } catch (e) {
+          localAnswer = { type: 'answer', sdp: '' };
+        }
+      } else {
+        localAnswer = { type: 'answer', sdp: '' };
+      }
+
+      fetch(this.apiUrl('/api/webrtc/answer'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId: GLOBAL_DISPATCH_ROOM,
+          senderId: this.senderId,
+          answer: localAnswer || { type: 'answer', sdp: '' },
+        }),
+      }).catch(() => {});
+
+      // Start 2-Way Voice Streaming immediately
+      this.startServerAudioRelay(
+        GLOBAL_DISPATCH_ROOM,
+        'callee',
+        Math.max(0, (Number(room?.latestAudioSeq) || 0) - 2)
+      );
+
       this.signalPollInterval = window.setInterval(async () => {
-        if (!this.peerConnection || this.state.role !== 'callee') return;
+        if (this.state.status === 'idle') return;
         try {
           const pollRes = await fetch(
-            this.apiUrl(`/api/webrtc/room/${encodeURIComponent(activeNum)}`)
+            this.apiUrl(`/api/webrtc/room/${GLOBAL_DISPATCH_ROOM}`)
           );
           if (!pollRes.ok) return;
           const latestRoom = await pollRes.json();
-          if (latestRoom.status === 'idle') {
-            this.endCall(false);
-            return;
-          }
           if (latestRoom.liveLocation) {
             this.state.remoteLocation = latestRoom.liveLocation;
           }
-          if (Array.isArray(latestRoom.locationTrail)) {
+          if (Array.isArray(latestRoom.locationTrail) && latestRoom.locationTrail.length > 0) {
             this.state.locationTrail = latestRoom.locationTrail;
           }
-          if (Array.isArray(latestRoom.callerCandidates)) {
+          if (
+            this.peerConnection &&
+            this.peerConnection.currentRemoteDescription &&
+            Array.isArray(latestRoom.callerCandidates)
+          ) {
             while (this.addedCandidateCount < latestRoom.callerCandidates.length) {
               const cand = latestRoom.callerCandidates[this.addedCandidateCount];
               this.addedCandidateCount++;
@@ -740,13 +993,13 @@ class EmergencyCallManager {
           }
           this.emit();
         } catch (e) {}
-      }, 750);
-    } catch (err) {
-      console.error('Failed to answer incoming Phone call on Laptop:', err);
+      }, 700);
+    } finally {
+      this.isStartingOrAnswering = false;
     }
   }
 
-  private startPhoneGpsStreaming(roomId: string, fallbackLoc: RemotePhoneLocation) {
+  private startPhoneGpsStreaming(_roomId: string, fallbackLoc: RemotePhoneLocation) {
     if (this.gpsWatchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
       navigator.geolocation.clearWatch(this.gpsWatchId);
       this.gpsWatchId = null;
@@ -771,11 +1024,19 @@ class EmergencyCallManager {
             };
             this.state.remoteLocation = loc;
             this.emit();
+
+            crossIpVoiceBus.publish({
+              type: 'gps',
+              role: this.state.role === 'callee' ? 'callee' : 'caller',
+              location: loc,
+            });
+
             fetch(this.apiUrl('/api/webrtc/location'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                roomId,
+                roomId: GLOBAL_DISPATCH_ROOM,
+                senderId: this.senderId,
                 ...loc,
               }),
             }).catch(() => {});
@@ -791,113 +1052,357 @@ class EmergencyCallManager {
     }
   }
 
-  /**
-   * Server-side HTTP Audio Chunk Relay across 2 IPs:
-   * Automatically records short 650ms audio slices and exchanges them via /api/webrtc/audio
-   * whenever direct UDP WebRTC is still negotiating or blocked by symmetric NAT between 2 IPs.
-   */
-  private startServerAudioRelay(roomId: string, myRole: 'caller' | 'callee') {
-    this.stopServerAudioRelay();
-    this.lastPlayedAudioSeq = 0;
+  private encodeInt16ToBase64(int16: Int16Array): string {
+    const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(
+        null,
+        Array.from(bytes.subarray(i, i + chunkSize))
+      );
+    }
+    return window.btoa(binary);
+  }
 
-    // 1. Push microphone audio slices if MediaRecorder is supported
-    if (this.micStream && typeof MediaRecorder !== 'undefined') {
-      try {
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : MediaRecorder.isTypeSupported('audio/mp4')
-          ? 'audio/mp4'
-          : '';
-        const recorder = mimeType
-          ? new MediaRecorder(this.micStream, { mimeType })
-          : new MediaRecorder(this.micStream);
-        this.mediaRecorder = recorder;
+  private decodeBase64ToFloat32WithAgc(b64: string): Float32Array {
+    const binary = window.atob(b64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const sampleCount = Math.floor(bytes.byteLength / 2);
+    const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, sampleCount);
+    const float32 = new Float32Array(sampleCount);
 
-        recorder.ondataavailable = (e) => {
-          // Only relay over HTTP if direct WebRTC P2P track isn't already playing audio or if muted is false
-          if (this.webrtcDirectConnected || this.state.micMuted || !e.data || e.data.size < 100) {
-            return;
-          }
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64 = typeof reader.result === 'string' ? reader.result : '';
-            if (base64) {
-              fetch(this.apiUrl('/api/webrtc/audio'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  roomId,
-                  role: myRole,
-                  mimeType: e.data.type || mimeType || 'audio/webm',
-                  base64,
-                }),
-              }).catch(() => {});
-            }
-          };
-          reader.readAsDataURL(e.data);
-        };
-
-        recorder.start(700);
-      } catch (e) {}
+    let maxAbs = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      const v = int16[i] / 32768.0;
+      float32[i] = v;
+      const a = Math.abs(v);
+      if (a > maxAbs) maxAbs = a;
     }
 
-    // 2. Pull remote audio slices if direct WebRTC P2P is not yet active
+    // Automatic Gain Control (AGC): boost speech up to 6.0x with soft-clipping
+    const gain = maxAbs > 0.005 ? Math.min(6.0, Math.max(1.6, 0.88 / maxAbs)) : 1.8;
+    for (let i = 0; i < sampleCount; i++) {
+      float32[i] = Math.tanh(float32[i] * gain);
+    }
+    return float32;
+  }
+
+  private playWavFallback(floatSamples: Float32Array, sampleRate: number) {
+    try {
+      const numSamples = floatSamples.length;
+      const buffer = new ArrayBuffer(44 + numSamples * 2);
+      const view = new DataView(buffer);
+      const writeStr = (offset: number, str: string) => {
+        for (let i = 0; i < str.length; i++) {
+          view.setUint8(offset + i, str.charCodeAt(i));
+        }
+      };
+      writeStr(0, 'RIFF');
+      view.setUint32(4, 36 + numSamples * 2, true);
+      writeStr(8, 'WAVE');
+      writeStr(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, 'data');
+      view.setUint32(40, numSamples * 2, true);
+      let offset = 44;
+      for (let i = 0; i < numSamples; i++) {
+        const s = Math.max(-1, Math.min(1, floatSamples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        offset += 2;
+      }
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const wavAudio = new Audio(`data:audio/wav;base64,${window.btoa(binary)}`);
+      wavAudio.volume = 1.0;
+      wavAudio.play().catch(() => {});
+    } catch (e) {}
+  }
+
+  /**
+   * Plays an incoming PCM16 audio chunk at native AudioContext sampleRate for 100% compatibility
+   * on Android WebView, Mobile Chrome, Safari, and Desktop browsers.
+   */
+  private playIncomingPcm16(pcm16Base64: string, chunkSampleRate: number = 8000) {
+    try {
+      const floatSamples = this.decodeBase64ToFloat32WithAgc(pcm16Base64);
+      if (floatSamples.length === 0) return;
+
+      let sumSq = 0;
+      for (let i = 0; i < floatSamples.length; i++) {
+        sumSq += floatSamples[i] * floatSamples[i];
+      }
+      const rms = Math.sqrt(sumSq / floatSamples.length);
+      const voiceLvl = Math.min(100, Math.round(rms * 240));
+
+      this.lastRelayVoiceTimestamp = Date.now();
+      this.state.remoteVoiceLevel = voiceLvl;
+      this.state.dispatcherSpeaking = voiceLvl > 8;
+      this.state.transportMode = 'server-relay';
+      this.emit();
+
+      if (this.remoteAudioEl) {
+        this.remoteAudioEl.muted = true;
+      }
+
+      if (!this.state.speakerphoneOn) return;
+
+      const playCtx = this.ensureAudioContext();
+      if (!playCtx || playCtx.state !== 'running') {
+        if (playCtx && playCtx.state === 'suspended') {
+          playCtx.resume().catch(() => {});
+        }
+        this.playWavFallback(floatSamples, chunkSampleRate || 8000);
+        return;
+      }
+
+      // Resample to native playCtx.sampleRate in JS so mobile WebViews never fail on 8kHz buffers
+      const nativeSr = playCtx.sampleRate || 48000;
+      const srcSr = chunkSampleRate || 8000;
+      const outLen = Math.max(1, Math.round((floatSamples.length * nativeSr) / srcSr));
+      const audioBuffer = playCtx.createBuffer(1, outLen, nativeSr);
+      const outChannel = audioBuffer.getChannelData(0);
+
+      const step = (floatSamples.length - 1) / Math.max(1, outLen - 1);
+      for (let i = 0; i < outLen; i++) {
+        const pos = i * step;
+        const idx = Math.floor(pos);
+        const frac = pos - idx;
+        const s0 = floatSamples[idx] ?? 0;
+        const s1 = floatSamples[Math.min(floatSamples.length - 1, idx + 1)] ?? s0;
+        outChannel[i] = s0 + (s1 - s0) * frac;
+      }
+
+      // 24-sample micro-fade at edges to prevent clicks when resyncing
+      const fadeSamples = Math.min(24, Math.floor(outLen / 8));
+      for (let i = 0; i < fadeSamples; i++) {
+        const g = i / fadeSamples;
+        outChannel[i] *= g;
+        outChannel[outLen - 1 - i] *= g;
+      }
+
+      const bufferSource = playCtx.createBufferSource();
+      bufferSource.buffer = audioBuffer;
+      if (this.masterSpeakerGain) {
+        bufferSource.connect(this.masterSpeakerGain);
+      } else {
+        bufferSource.connect(playCtx.destination);
+      }
+
+      const nowTime = playCtx.currentTime;
+      if (this.nextPlayTime < nowTime) {
+        this.nextPlayTime = nowTime + 0.035;
+      } else if (this.nextPlayTime > nowTime + 0.32) {
+        this.nextPlayTime = nowTime + 0.05;
+      }
+      bufferSource.start(this.nextPlayTime);
+      this.nextPlayTime += audioBuffer.duration;
+    } catch (e) {}
+  }
+
+  private flushHttpAudioQueue() {
+    if (this.isPostingAudio || this.httpPendingPackets.length === 0) return;
+    if (this.state.status === 'idle' || this.state.micMuted) {
+      this.httpPendingPackets = [];
+      return;
+    }
+
+    // Keep at most 6 packets (~720ms) in HTTP fallback queue so HTTP never lags behind real time
+    if (this.httpPendingPackets.length > 6) {
+      this.httpPendingPackets = this.httpPendingPackets.slice(-4);
+    }
+
+    const pkt = this.httpPendingPackets.shift()!;
+    this.isPostingAudio = true;
+    fetch(this.apiUrl('/api/webrtc/audio'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: GLOBAL_DISPATCH_ROOM,
+        packetId: pkt.packetId,
+        senderId: this.senderId,
+        role: pkt.role,
+        mimeType: 'audio/pcm;rate=8000',
+        pcm16: pkt.pcm16,
+        sampleRate: 8000,
+      }),
+    })
+      .catch(() => {})
+      .finally(() => {
+        this.isPostingAudio = false;
+        if (this.httpPendingPackets.length > 0) {
+          this.flushHttpAudioQueue();
+        }
+      });
+  }
+
+  /**
+   * Downsamples raw float microphone samples to 8000 Hz Int16 PCM and transmits over BOTH
+   * the Global Cross-IP WSS Bus and the Express /api/webrtc/audio endpoint using the SAME packetId.
+   */
+  private ingestLocalMicSamples(inputData: Float32Array, inputSampleRate: number) {
+    if (this.state.status === 'idle' || this.state.micMuted) {
+      this.sampleAccumulator = [];
+      this.httpPendingPackets = [];
+      return;
+    }
+
+    const targetSampleRate = 8000;
+    const ratio = Math.max(1, inputSampleRate / targetSampleRate);
+    const outLength = Math.max(1, Math.floor(inputData.length / ratio));
+
+    for (let i = 0; i < outLength; i++) {
+      const idx = Math.min(inputData.length - 1, Math.floor(i * ratio));
+      const boosted = Math.tanh(inputData[idx] * 1.9);
+      this.sampleAccumulator.push(
+        boosted < 0 ? Math.round(boosted * 0x8000) : Math.round(boosted * 0x7fff)
+      );
+    }
+
+    // Flush every 960 samples (120ms at 8000 Hz) for ultra-low latency
+    while (this.sampleAccumulator.length >= 960) {
+      const slice = this.sampleAccumulator.splice(0, 960);
+      const int16Packet = new Int16Array(slice);
+      const pcm16Base64 = this.encodeInt16ToBase64(int16Packet);
+      const myRole = this.state.role === 'callee' ? 'callee' : 'caller';
+      const packetId = `${this.senderId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      this.rememberPlayedPacket(packetId);
+
+      // 1. Instant Global Cross-IP WSS Bus broadcast
+      crossIpVoiceBus.publish({
+        id: packetId,
+        type: 'audio',
+        role: myRole,
+        pcm16: pcm16Base64,
+        sampleRate: targetSampleRate,
+      });
+
+      // 2. Queue into HTTP + Server-to-Server WSS bridge with the EXACT SAME packetId
+      this.httpPendingPackets.push({
+        packetId,
+        pcm16: pcm16Base64,
+        role: myRole,
+      });
+      this.flushHttpAudioQueue();
+    }
+  }
+
+  private startServerAudioRelay(
+    _roomId: string,
+    myRole: 'caller' | 'callee',
+    initialSeq: number = 0
+  ) {
+    if (this.audioRelayPullInterval) {
+      window.clearInterval(this.audioRelayPullInterval);
+      this.audioRelayPullInterval = null;
+    }
+    this.lastPlayedAudioSeq = initialSeq;
+    this.nextPlayTime = 0;
+    this.isPullingAudio = false;
+
+    // Continuously poll Express server for remote audio packets; deduplicate by packetId
     this.audioRelayPullInterval = window.setInterval(async () => {
-      if (this.webrtcDirectConnected || this.state.status !== 'connected') return;
+      if (this.state.status === 'idle' || this.isPullingAudio) return;
+
+      this.isPullingAudio = true;
       try {
         const res = await fetch(
           this.apiUrl(
-            `/api/webrtc/audio/${encodeURIComponent(roomId)}/${myRole}?after=${this.lastPlayedAudioSeq}`
+            `/api/webrtc/audio/${GLOBAL_DISPATCH_ROOM}/${myRole}?after=${
+              this.lastPlayedAudioSeq
+            }&senderId=${encodeURIComponent(this.senderId)}`
           )
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          this.isPullingAudio = false;
+          return;
+        }
         const data = await res.json();
         if (Array.isArray(data.chunks) && data.chunks.length > 0) {
-          this.state.transportMode = 'server-relay';
-          for (const chunk of data.chunks) {
+          if (this.state.status === 'ringing') {
+            this.onPeerVoiceConnected();
+          }
+          const chunksToPlay =
+            data.chunks.length > 5 ? data.chunks.slice(data.chunks.length - 4) : data.chunks;
+
+          for (const chunk of chunksToPlay) {
             if (chunk.seq > this.lastPlayedAudioSeq) {
               this.lastPlayedAudioSeq = chunk.seq;
-              const audio = new Audio(chunk.base64);
-              audio.volume = 1.0;
-              this.state.remoteVoiceLevel = 65;
-              this.state.dispatcherSpeaking = true;
-              this.emit();
-              audio.onended = () => {
-                this.state.remoteVoiceLevel = 0;
-                this.state.dispatcherSpeaking = false;
-                this.emit();
-              };
-              audio.play().catch(() => {});
+              if (chunk.pcm16 && !this.rememberPlayedPacket(chunk.packetId)) {
+                this.playIncomingPcm16(chunk.pcm16, Number(chunk.sampleRate) || 8000);
+              }
             }
           }
         }
-      } catch (e) {}
-    }, 600);
+      } catch (e) {
+      } finally {
+        this.isPullingAudio = false;
+      }
+    }, 110);
   }
 
   private stopServerAudioRelay() {
-    if (this.mediaRecorder) {
-      try {
-        if (this.mediaRecorder.state !== 'inactive') {
-          this.mediaRecorder.stop();
-        }
-      } catch (e) {}
-      this.mediaRecorder = null;
+    if (this.deviceMode !== 'laptop') {
+      if (this.pcmProcessorNode) {
+        try {
+          this.pcmProcessorNode.onaudioprocess = null;
+          this.pcmProcessorNode.disconnect();
+        } catch (e) {}
+        this.pcmProcessorNode = null;
+      }
+      if (this.pcmSourceNode) {
+        try {
+          this.pcmSourceNode.disconnect();
+        } catch (e) {}
+        this.pcmSourceNode = null;
+      }
+      if (this.pcmZeroGainNode) {
+        try {
+          this.pcmZeroGainNode.disconnect();
+        } catch (e) {}
+        this.pcmZeroGainNode = null;
+      }
+      this.scriptProcessorActive = false;
     }
     if (this.audioRelayPullInterval) {
       window.clearInterval(this.audioRelayPullInterval);
       this.audioRelayPullInterval = null;
     }
+    this.sampleAccumulator = [];
+    this.httpPendingPackets = [];
+    this.isPullingAudio = false;
+    this.isPostingAudio = false;
+    this.nextPlayTime = 0;
   }
 
   private async checkForIncomingCall() {
-    if (this.state.status !== 'idle') return;
-    const activeNum = this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
+    if (this.state.status !== 'idle' || this.isStartingOrAnswering) return;
+    if (this.deviceMode === 'phone' || Date.now() - this.lastCallInitiatedByMeAt < 12000) {
+      return;
+    }
     try {
-      const res = await fetch(this.apiUrl(`/api/webrtc/room/${encodeURIComponent(activeNum)}`));
+      const res = await fetch(this.apiUrl(`/api/webrtc/room/${GLOBAL_DISPATCH_ROOM}`));
       if (!res.ok) return;
       const room = await res.json();
-      const hasRingingOffer = Boolean(room && room.status === 'ringing' && room.offer);
+      const hasRingingOffer = Boolean(
+        room &&
+          (room.status === 'ringing' || room.status === 'connected') &&
+          room.callerSenderId !== this.senderId &&
+          (room.offer || room.latestAudioSeq > 0)
+      );
       const loc: RemotePhoneLocation | null = room?.liveLocation || null;
       const callerUnit = loc?.unitNumber || room?.callerContext?.unitNumber || 'PHONE CAB UNIT';
       const callerGps =
@@ -905,33 +1410,30 @@ class EmergencyCallManager {
           ? `${Number(loc.latitude).toFixed(5)}, ${Number(loc.longitude).toFixed(5)}`
           : '';
       const info = hasRingingOffer
-        ? `Incoming Emergency Call on ${activeNum} from ${callerUnit}${callerGps ? ` (GPS: ${callerGps})` : ''}`
+        ? `Incoming Emergency Call from ${callerUnit}${callerGps ? ` (GPS: ${callerGps})` : ''}`
         : '';
 
       if (hasRingingOffer && !this.state.incomingCallAvailable) {
         this.startIncomingRingtone();
-        // If Laptop Auto-Answer is enabled, answer automatically!
         if (this.state.autoAnswerOnLaptop) {
           this.state.remoteLocation = loc;
           this.state.locationTrail = Array.isArray(room?.locationTrail) ? room.locationTrail : [];
-          this.answerIncomingCall(activeNum);
+          this.answerIncomingCall();
           return;
         }
-      } else if (!hasRingingOffer && this.state.incomingCallAvailable) {
-        this.stopIncomingRingtone();
       }
 
-      if (
-        hasRingingOffer !== this.state.incomingCallAvailable ||
-        info !== this.state.incomingCallerInfo ||
-        loc?.updatedAt !== this.state.remoteLocation?.updatedAt
-      ) {
-        this.state.incomingCallAvailable = hasRingingOffer;
+      if (hasRingingOffer) {
+        this.state.incomingCallAvailable = true;
         this.state.incomingCallerInfo = info;
         if (loc) {
           this.state.remoteLocation = loc;
           this.state.locationTrail = Array.isArray(room?.locationTrail) ? room.locationTrail : [];
         }
+        this.emit();
+      } else if (loc && loc.updatedAt !== this.state.remoteLocation?.updatedAt) {
+        this.state.remoteLocation = loc;
+        this.state.locationTrail = Array.isArray(room?.locationTrail) ? room.locationTrail : [];
         this.emit();
       }
     } catch (e) {}
@@ -948,9 +1450,7 @@ class EmergencyCallManager {
       this.playPickupClick();
       this.state.status = 'connected';
       this.state.peerConnected = true;
-      if (this.state.transportMode === 'connecting') {
-        this.state.transportMode = this.webrtcDirectConnected ? 'webrtc-p2p' : 'server-relay';
-      }
+      this.state.transportMode = 'server-relay';
       this.state.durationSeconds = 0;
       this.state.dispatchTranscript =
         'REAL TWO-WAY INTERNET VOICE + LIVE PHONE GPS CONNECTED — Speak on Laptop or Phone to talk live!';
@@ -969,46 +1469,115 @@ class EmergencyCallManager {
   }
 
   public reannounceDispatch(_context?: EmergencyCallContext) {
-    this.dialCellularSimCall(this.state.phoneNumber);
+    if (this.state.status === 'idle') {
+      this.startInstantCall(GLOBAL_DISPATCH_ROOM, _context);
+    }
   }
 
+  /**
+   * Opens local microphone and builds a single continuous WebAudio capture chain:
+   * micSourceNode -> localAnalyser -> pcmProcessorNode -> pcmZeroGainNode (0.0001) -> ctx.destination
+   * Reuses pre-warmed mic stream if already live for 0ms instant activation on Laptop Control Room.
+   */
   private async openLocalMicrophone(): Promise<MediaStream | null> {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       return null;
     }
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      this.micStream = stream;
-      this.state.micActive = true;
-      this.emit();
-
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!this.audioCtx || this.audioCtx.state === 'closed') {
-        this.audioCtx = new AudioContextClass();
-      }
-      if (this.audioCtx.state === 'suspended') {
-        await this.audioCtx.resume().catch(() => {});
-      }
-
-      const source = this.audioCtx.createMediaStreamSource(stream);
-      this.localAnalyser = this.audioCtx.createAnalyser();
-      this.localAnalyser.fftSize = 128;
-      source.connect(this.localAnalyser);
-
-      this.startAudioLevelMeters();
-      return stream;
-    } catch (err) {
-      this.state.micActive = false;
-      this.emit();
-      return null;
+    const ctx = this.ensureAudioContext();
+    if (ctx && ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
     }
+
+    let stream: MediaStream | null = this.micStream;
+    const hasLiveTrack =
+      stream && stream.getAudioTracks().some((t) => t.readyState === 'live');
+
+    if (!hasLiveTrack) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (firstErr) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (secondErr) {
+          this.state.micActive = false;
+          this.emit();
+          return null;
+        }
+      }
+    }
+
+    this.micStream = stream;
+    this.state.micActive = true;
+    this.micOpenTimeMs = Date.now();
+    this.emit();
+
+    if (ctx && stream && (!this.pcmProcessorNode || !this.localAnalyser)) {
+      try {
+        if (this.pcmProcessorNode) {
+          try {
+            this.pcmProcessorNode.onaudioprocess = null;
+            this.pcmProcessorNode.disconnect();
+          } catch (e) {}
+        }
+        if (this.pcmSourceNode) {
+          try {
+            this.pcmSourceNode.disconnect();
+          } catch (e) {}
+        }
+        if (this.pcmZeroGainNode) {
+          try {
+            this.pcmZeroGainNode.disconnect();
+          } catch (e) {}
+        }
+
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+
+        const processor = ctx.createScriptProcessor(2048, 1, 1);
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0.0001;
+
+        this.pcmSourceNode = source;
+        this.localAnalyser = analyser;
+        this.pcmProcessorNode = processor;
+        this.pcmZeroGainNode = silentGain;
+        this.sampleAccumulator = [];
+        this.scriptProcessorActive = false;
+
+        processor.onaudioprocess = (event) => {
+          const inputData = event.inputBuffer.getChannelData(0);
+          if (!inputData || inputData.length === 0) return;
+          if (!this.scriptProcessorActive) {
+            for (let i = 0; i < inputData.length; i += 8) {
+              if (Math.abs(inputData[i]) > 0.00001) {
+                this.scriptProcessorActive = true;
+                break;
+              }
+            }
+          }
+          if (this.scriptProcessorActive) {
+            this.lastScriptProcessorMs = Date.now();
+            this.ingestLocalMicSamples(inputData, ctx.sampleRate || 48000);
+          }
+        };
+
+        source.connect(analyser);
+        analyser.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(ctx.destination);
+      } catch (e) {}
+    }
+
+    this.startAudioLevelMeters();
+    return stream;
   }
 
   private attachRemoteAudioStream(remoteMediaStream: MediaStream) {
@@ -1016,24 +1585,20 @@ class EmergencyCallManager {
     const audioEl = this.ensureRemoteAudioElement();
     if (audioEl) {
       audioEl.srcObject = remoteMediaStream;
-      audioEl.muted = false;
+      audioEl.muted = Date.now() - this.lastRelayVoiceTimestamp < 2000;
       audioEl.volume = 1.0;
       audioEl.play().catch(() => {});
     }
 
     try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!this.audioCtx || this.audioCtx.state === 'closed') {
-        this.audioCtx = new AudioContextClass();
+      const ctx = this.ensureAudioContext();
+      if (ctx) {
+        const remoteSource = ctx.createMediaStreamSource(remoteMediaStream);
+        this.remoteAnalyser = ctx.createAnalyser();
+        this.remoteAnalyser.fftSize = 256;
+        remoteSource.connect(this.remoteAnalyser);
+        this.startAudioLevelMeters();
       }
-      if (this.audioCtx.state === 'suspended') {
-        this.audioCtx.resume().catch(() => {});
-      }
-      const remoteSource = this.audioCtx.createMediaStreamSource(remoteMediaStream);
-      this.remoteAnalyser = this.audioCtx.createAnalyser();
-      this.remoteAnalyser.fftSize = 128;
-      remoteSource.connect(this.remoteAnalyser);
-      this.startAudioLevelMeters();
     } catch (e) {}
   }
 
@@ -1042,27 +1607,61 @@ class EmergencyCallManager {
       window.clearInterval(this.meterInterval);
     }
 
-    const localData = new Uint8Array(64);
-    const remoteData = new Uint8Array(64);
+    const localFreqData = new Uint8Array(64);
+    const localTimeData = new Float32Array(2048);
+    const remoteFreqData = new Uint8Array(64);
 
     this.meterInterval = window.setInterval(() => {
+      if (this.audioCtx && this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume().catch(() => {});
+      }
+
       if (this.localAnalyser && !this.state.micMuted) {
-        this.localAnalyser.getByteFrequencyData(localData);
+        this.localAnalyser.getByteFrequencyData(localFreqData);
         let sum = 0;
-        for (let i = 0; i < localData.length; i++) sum += localData[i];
-        const avg = sum / localData.length;
-        this.state.micLevel = Math.min(100, Math.round((avg / 120) * 100));
+        for (let i = 0; i < localFreqData.length; i++) sum += localFreqData[i];
+        const avg = sum / localFreqData.length;
+        this.state.micLevel = Math.min(100, Math.round((avg / 110) * 100));
+
+        // Failsafe ONLY when ScriptProcessorNode has never fired on this browser (> 650ms after mic open)
+        if (
+          this.state.status !== 'idle' &&
+          !this.scriptProcessorActive &&
+          Date.now() - this.micOpenTimeMs > 650
+        ) {
+          this.localAnalyser.getFloatTimeDomainData(localTimeData);
+          this.ingestLocalMicSamples(localTimeData, 20480);
+        }
       } else {
         this.state.micLevel = 0;
       }
 
-      if (this.remoteAnalyser) {
-        this.remoteAnalyser.getByteFrequencyData(remoteData);
+      const relayActiveRecently = Date.now() - this.lastRelayVoiceTimestamp < 1500;
+      if (this.remoteAudioEl) {
+        this.remoteAudioEl.muted = relayActiveRecently;
+      }
+
+      let webrtcHasVoice = false;
+      if (!relayActiveRecently && this.remoteAnalyser) {
+        this.remoteAnalyser.getByteFrequencyData(remoteFreqData);
         let rSum = 0;
-        for (let i = 0; i < remoteData.length; i++) rSum += remoteData[i];
-        const rAvg = rSum / remoteData.length;
-        this.state.remoteVoiceLevel = Math.min(100, Math.round((rAvg / 120) * 100));
-        this.state.dispatcherSpeaking = this.state.remoteVoiceLevel > 12;
+        for (let i = 0; i < remoteFreqData.length; i++) rSum += remoteFreqData[i];
+        const rAvg = rSum / remoteFreqData.length;
+        const iceState = this.peerConnection?.iceConnectionState;
+        if (rAvg > 8 && (iceState === 'connected' || iceState === 'completed')) {
+          webrtcHasVoice = true;
+          this.state.transportMode = 'webrtc-p2p';
+          this.state.remoteVoiceLevel = Math.min(100, Math.round((rAvg / 120) * 100));
+          this.state.dispatcherSpeaking = this.state.remoteVoiceLevel > 12;
+        }
+      }
+
+      if (!webrtcHasVoice && Date.now() - this.lastRelayVoiceTimestamp > 380) {
+        this.state.remoteVoiceLevel = Math.max(0, Math.round(this.state.remoteVoiceLevel * 0.55));
+        if (this.state.remoteVoiceLevel < 8) {
+          this.state.remoteVoiceLevel = 0;
+          this.state.dispatcherSpeaking = false;
+        }
       }
 
       this.emit();
@@ -1074,16 +1673,11 @@ class EmergencyCallManager {
     const playRing = () => {
       if (!this.state.incomingCallAvailable || this.state.status !== 'idle') return;
       try {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        if (!this.audioCtx || this.audioCtx.state === 'closed') {
-          this.audioCtx = new AudioContextClass();
-        }
-        if (this.audioCtx.state === 'suspended') {
-          this.audioCtx.resume();
-        }
-        const now = this.audioCtx.currentTime;
-        const osc = this.audioCtx.createOscillator();
-        const gain = this.audioCtx.createGain();
+        const ctx = this.ensureAudioContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
         osc.type = 'square';
         osc.frequency.setValueAtTime(784, now);
         osc.frequency.setValueAtTime(987, now + 0.18);
@@ -1093,7 +1687,7 @@ class EmergencyCallManager {
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
 
         osc.connect(gain);
-        gain.connect(this.audioCtx.destination);
+        gain.connect(ctx.destination);
         osc.start(now);
         osc.stop(now + 0.62);
       } catch (e) {}
@@ -1116,34 +1710,29 @@ class EmergencyCallManager {
     const playBurst = () => {
       if (this.state.status !== 'ringing') return;
       try {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        if (!this.audioCtx || this.audioCtx.state === 'closed') {
-          this.audioCtx = new AudioContextClass();
-        }
-        if (this.audioCtx.state === 'suspended') {
-          this.audioCtx.resume();
-        }
-        const now = this.audioCtx.currentTime;
-        const osc1 = this.audioCtx.createOscillator();
-        const osc2 = this.audioCtx.createOscillator();
-        const gain = this.audioCtx.createGain();
+        const ctx = this.ensureAudioContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
 
         osc1.type = 'sine';
         osc2.type = 'sine';
         osc1.frequency.setValueAtTime(440, now);
         osc2.frequency.setValueAtTime(480, now);
 
-        gain.gain.setValueAtTime(0.12, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 1.1);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 1.0);
 
         osc1.connect(gain);
         osc2.connect(gain);
-        gain.connect(this.audioCtx.destination);
+        gain.connect(ctx.destination);
 
         osc1.start(now);
         osc2.start(now);
-        osc1.stop(now + 1.15);
-        osc2.stop(now + 1.15);
+        osc1.stop(now + 1.05);
+        osc2.stop(now + 1.05);
       } catch (e) {}
     };
 
@@ -1153,17 +1742,11 @@ class EmergencyCallManager {
 
   private playPickupClick() {
     try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!this.audioCtx || this.audioCtx.state === 'closed') {
-        this.audioCtx = new AudioContextClass();
-      }
-      if (this.audioCtx.state === 'suspended') {
-        this.audioCtx.resume();
-      }
-
-      const now = this.audioCtx.currentTime;
-      const osc = this.audioCtx.createOscillator();
-      const gain = this.audioCtx.createGain();
+      const ctx = this.ensureAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(880, now);
       osc.frequency.setValueAtTime(1320, now + 0.08);
@@ -1172,7 +1755,7 @@ class EmergencyCallManager {
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
 
       osc.connect(gain);
-      gain.connect(this.audioCtx.destination);
+      gain.connect(ctx.destination);
 
       osc.start(now);
       osc.stop(now + 0.22);
@@ -1191,12 +1774,15 @@ class EmergencyCallManager {
   }
 
   public endCall(notifyServer: boolean = true) {
-    const activeNum = this.state.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
     if (notifyServer) {
+      crossIpVoiceBus.publish({
+        type: 'hangup',
+        role: this.state.role === 'callee' ? 'callee' : 'caller',
+      });
       fetch(this.apiUrl('/api/webrtc/hangup'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roomId: activeNum }),
+        body: JSON.stringify({ roomId: GLOBAL_DISPATCH_ROOM, senderId: this.senderId }),
       }).catch(() => {});
     }
     this.cleanupSession(true);
@@ -1217,10 +1803,6 @@ class EmergencyCallManager {
       window.clearInterval(this.durationInterval);
       this.durationInterval = null;
     }
-    if (this.meterInterval) {
-      window.clearInterval(this.meterInterval);
-      this.meterInterval = null;
-    }
     if (this.signalPollInterval) {
       window.clearInterval(this.signalPollInterval);
       this.signalPollInterval = null;
@@ -1231,18 +1813,26 @@ class EmergencyCallManager {
       } catch (e) {}
       this.peerConnection = null;
     }
-    if (this.micStream) {
-      this.micStream.getTracks().forEach((t) => t.stop());
-      this.micStream = null;
+    if (this.deviceMode !== 'laptop') {
+      if (this.meterInterval) {
+        window.clearInterval(this.meterInterval);
+        this.meterInterval = null;
+      }
+      if (this.micStream) {
+        this.micStream.getTracks().forEach((t) => t.stop());
+        this.micStream = null;
+      }
+      this.localAnalyser = null;
     }
     if (this.remoteAudioEl) {
       this.remoteAudioEl.srcObject = null;
     }
-    this.localAnalyser = null;
     this.remoteAnalyser = null;
-    this.webrtcDirectConnected = false;
 
     if (resetToIdle) {
+      const keepMic =
+        this.deviceMode === 'laptop' &&
+        Boolean(this.micStream?.getAudioTracks().some((t) => t.readyState === 'live'));
       this.state = {
         ...this.state,
         status: 'idle',
@@ -1250,11 +1840,11 @@ class EmergencyCallManager {
         transportMode: 'connecting',
         phoneNumber: EMERGENCY_PHONE_NUMBER,
         durationSeconds: 0,
-        micActive: false,
+        micActive: keepMic,
         micMuted: false,
         isMuted: false,
         speakerphoneOn: true,
-        micLevel: 0,
+        micLevel: keepMic ? this.state.micLevel : 0,
         remoteVoiceLevel: 0,
         peerConnected: false,
         incomingCallAvailable: false,

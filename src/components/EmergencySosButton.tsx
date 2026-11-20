@@ -5,20 +5,15 @@ import {
   PhoneIncoming,
   XCircle,
   BellRing,
-  Settings,
-  Check,
-  X,
   Mic,
   MicOff,
   Radio,
-  Smartphone,
   Laptop,
   MapPin,
 } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
 import {
-  DEFAULT_EMERGENCY_PHONE_NUMBER,
   callEmergencyNumber,
   emergencyCallManager,
   EmergencyCallState,
@@ -39,8 +34,6 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
   const [isHolding, setIsHolding] = useState<boolean>(false);
   const [holdProgress, setHoldProgress] = useState<number>(0);
   const [callState, setCallState] = useState<EmergencyCallState>(emergencyCallManager.getState());
-  const [isEditingNumber, setIsEditingNumber] = useState<boolean>(false);
-  const [numberInput, setNumberInput] = useState<string>(emergencyCallManager.getPhoneNumber());
   const holdIntervalRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
 
@@ -49,16 +42,13 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
   useEffect(() => {
     const unsub = emergencyCallManager.subscribe((state) => {
       setCallState(state);
-      setNumberInput(state.phoneNumber);
     });
     return () => unsub();
   }, []);
 
-  const activePhone = callState.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
-
   const triggerInstantSosCall = () => {
     cabAudio.playEmergencyAlarm();
-    callEmergencyNumber(activePhone, {
+    callEmergencyNumber(undefined, {
       unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
       driverId: telemetry.driverId,
       speedKmh: telemetry.speedKmh,
@@ -114,107 +104,11 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
     return `${mins}:${secs}`;
   };
 
-  const handleSaveNumber = (e: React.FormEvent) => {
-    e.preventDefault();
-    cabAudio.playSuccessChime();
-    emergencyCallManager.setPhoneNumber(numberInput);
-    setIsEditingNumber(false);
-  };
-
   const isCallActive =
     telemetry.sosActive || callState.status === 'ringing' || callState.status === 'connected';
 
   return (
     <div className="w-full space-y-2.5">
-      {/* Incoming Call on Laptop from Phone (Over Internet Server / 2 IPs) + Real Location Map */}
-      {callState.incomingCallAvailable && callState.status === 'idle' && (
-        <div className="p-3.5 sm:p-4 rounded-xl bg-[#064e3b] border-2 sm:border-4 border-[#10b981] text-white shadow-[0_0_35px_rgba(16,185,129,0.6)] space-y-3">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-full bg-[#10b981] text-black flex items-center justify-center shrink-0 animate-bounce">
-                <PhoneIncoming className="w-6 h-6" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono text-[10px] font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase">
-                    INCOMING PHONE EMERGENCY CALL VIA INTERNET SERVER ({activePhone})
-                  </span>
-                  {callState.remoteLocation && (
-                    <span className="font-mono text-[10px] font-bold bg-black/50 text-[#38bdf8] px-2 py-0.5 rounded flex items-center gap-1">
-                      <MapPin className="w-3 h-3 text-[#ef4444]" />
-                      GPS: {callState.remoteLocation.latitude.toFixed(5)},{' '}
-                      {callState.remoteLocation.longitude.toFixed(5)}
-                    </span>
-                  )}
-                </div>
-                <h3 className="font-headline font-extrabold text-base sm:text-xl mt-0.5">
-                  {callState.incomingCallerInfo || `Phone Calling Laptop on Line ${activePhone}`}
-                </h3>
-                <p className="text-xs text-emerald-100">
-                  Click Answer below to talk to the Phone using your Laptop microphone &amp; view its live location on the map!
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                cabAudio.playSuccessChime();
-                emergencyCallManager.answerIncomingCall(activePhone);
-              }}
-              className="w-full sm:w-auto min-h-[52px] px-6 py-3 rounded-xl bg-[#10b981] hover:bg-[#34d399] text-black font-headline font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-2xl cursor-pointer animate-pulse"
-            >
-              <PhoneCall className="w-5 h-5 fill-black" />
-              <span>ANSWER PHONE CALL ON LAPTOP ({activePhone})</span>
-            </button>
-          </div>
-
-          {/* Live Map Preview even while ringing! */}
-          <LiveCallLocationMap
-            callState={callState}
-            fallbackLatitude={telemetry.gps.latitude}
-            fallbackLongitude={telemetry.gps.longitude}
-            fallbackUnit={telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId}
-          />
-        </div>
-      )}
-
-      {/* Inline Emergency Number Configurator */}
-      {isEditingNumber && (
-        <form
-          onSubmit={handleSaveNumber}
-          className="p-3 rounded-xl bg-[#161b22] border-2 border-[#38bdf8] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-xl"
-        >
-          <span className="text-xs font-headline font-bold text-white flex items-center gap-1.5">
-            <Settings className="w-4 h-4 text-[#38bdf8]" />
-            <span>SET EMERGENCY CALL NUMBER / CHANNEL ID:</span>
-          </span>
-          <div className="flex items-center gap-2 flex-1 max-w-md">
-            <input
-              type="tel"
-              value={numberInput}
-              onChange={(e) => setNumberInput(e.target.value)}
-              placeholder="e.g. 82199"
-              className="flex-1 min-h-[40px] px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#30363d] text-white font-mono text-sm font-bold focus:outline-none focus:border-[#38bdf8]"
-            />
-            <button
-              type="submit"
-              className="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-[#10b981] text-black font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer"
-            >
-              <Check className="w-4 h-4" />
-              <span>SAVE</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsEditingNumber(false)}
-              className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-[#21262d] text-[#94a3b8] hover:text-white text-xs cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </form>
-      )}
-
       {isCallActive ? (
         /* Active Two-Way Voice Call + Real-Time Phone GPS Location Map */
         <div className="p-3.5 sm:p-4 rounded-xl bg-[#93000a] border-2 sm:border-4 border-white text-white shadow-2xl space-y-3">
@@ -227,8 +121,8 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono text-xs font-bold bg-[#10b981] text-black px-2 py-0.5 rounded uppercase">
                     {callState.peerConnected
-                      ? `PHONE ↔ LAPTOP 2-WAY VOICE LIVE (${activePhone}) · ${formatDuration(callState.durationSeconds)}`
-                      : `CALLING LAPTOP OVER INTERNET SERVER (${activePhone})`}
+                      ? `PHONE ↔ LAPTOP 2-WAY VOICE LIVE · ${formatDuration(callState.durationSeconds)}`
+                      : 'CALLING LAPTOP OVER INTERNET SERVER'}
                   </span>
                   <span className="font-mono text-xs bg-black/40 px-2 py-0.5 rounded text-[#38bdf8]">
                     {callState.role === 'callee' ? 'LAPTOP DISPATCH MODE' : 'PHONE CALLER MODE'}
@@ -236,8 +130,8 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                 </div>
                 <h3 className="font-headline font-bold text-lg sm:text-2xl mt-0.5">
                   {callState.peerConnected
-                    ? `LIVE VOICE CONNECTED (${activePhone}) — SPEAK NOW`
-                    : `RINGING LAPTOP (${activePhone}) — CLICK "ANSWER" ON LAPTOP`}
+                    ? 'LIVE 2-WAY VOICE CONNECTED — SPEAK NOW'
+                    : 'RINGING LAPTOP CONTROL ROOM — CLICK "ANSWER" ON LAPTOP'}
                 </h3>
                 <p className="text-xs font-body text-white/90">
                   {callState.dispatchTranscript}
@@ -261,15 +155,6 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
                 )}
                 <span>{callState.isMuted ? 'UNMUTE MIC' : 'MIC LIVE'}</span>
               </button>
-
-              <a
-                href={`tel:${activePhone}`}
-                onClick={() => emergencyCallManager.dialCellularSimCall(activePhone)}
-                className="flex-1 sm:flex-none h-11 px-3.5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap shadow-xl cursor-pointer"
-              >
-                <Smartphone className="w-4 h-4 text-black" />
-                <span>SIM CALL ({activePhone})</span>
-              </a>
 
               <button
                 type="button"
@@ -330,7 +215,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
           />
         </div>
       ) : (
-        /* Full-Width SOS Button + Call Now + Laptop Answer / Auto-Answer + Configure Number */
+        /* Full-Width SOS Button + Call Control Room + Laptop Answer / Auto-Answer */
         <div className="flex flex-col sm:flex-row items-stretch gap-2 w-full">
           <button
             onMouseDown={startHold}
@@ -351,7 +236,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
               <AlertOctagon className="w-7 h-7 sm:w-8 sm:h-8 text-white shrink-0" />
               <div className="text-left">
                 <span className="block leading-none text-base sm:text-2xl font-extrabold tracking-tight">
-                  EMERGENCY SOS · CALL {activePhone}
+                  EMERGENCY SOS · CALL CONTROL ROOM
                 </span>
                 <span className="block text-[10px] sm:text-[11px] font-mono tracking-normal text-white/90 uppercase mt-0.5 font-normal">
                   {isHolding
@@ -362,7 +247,7 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
             </div>
           </button>
 
-          {/* Call Now, Laptop Answer / Auto-Answer & Configure Number buttons */}
+          {/* Call Now & Laptop Answer / Auto-Answer buttons */}
           <div className="flex items-stretch gap-2 flex-wrap sm:flex-nowrap">
             <button
               type="button"
@@ -370,14 +255,14 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
               className="flex-1 sm:flex-none min-h-[52px] px-4 rounded-xl bg-[#10b981] hover:bg-[#059669] active:scale-95 text-black font-headline font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer whitespace-nowrap"
             >
               <PhoneCall className="w-4 h-4 fill-black text-black shrink-0" />
-              <span>Call Now ({activePhone})</span>
+              <span>Call Control Room</span>
             </button>
 
             <button
               type="button"
               onClick={() => {
                 cabAudio.playSuccessChime();
-                emergencyCallManager.answerIncomingCall(activePhone);
+                emergencyCallManager.answerIncomingCall();
               }}
               className="flex-1 sm:flex-none min-h-[52px] px-3.5 rounded-xl bg-[#0f2942] hover:bg-[#163a5c] text-[#38bdf8] border-2 border-[#38bdf8] font-headline font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
               title="Click on Laptop to answer incoming Phone call and view live Phone GPS Map"
@@ -401,20 +286,6 @@ export const EmergencySosButton: React.FC<EmergencySosButtonProps> = ({
             >
               <Laptop className="w-4 h-4 shrink-0" />
               <span>{callState.autoAnswerOnLaptop ? 'LAPTOP AUTO-ANSWER: ON' : 'LAPTOP AUTO-ANSWER'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                cabAudio.playKeyClick();
-                setNumberInput(activePhone);
-                setIsEditingNumber(!isEditingNumber);
-              }}
-              className="min-h-[52px] px-3.5 rounded-xl bg-[#1c2b3c] hover:bg-[#273647] text-[#38bdf8] border-2 border-[#38bdf8]/60 font-headline font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
-              title="Configure Emergency Phone Number"
-            >
-              <Settings className="w-4 h-4 shrink-0" />
-              <span>SET NUMBER</span>
             </button>
           </div>
         </div>

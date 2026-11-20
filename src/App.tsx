@@ -22,8 +22,6 @@ import { TelemetryData, IncidentEvent, SafetyStatus, EspSensorPacket, FleetVehic
 import { cabAudio } from './utils/audio';
 import { espManager } from './utils/espManager';
 import { useAuth } from './context/AuthContext';
-import { db } from './lib/firebase';
-import { collection, addDoc } from 'firebase/firestore';
 import { PersistentHardwareBar } from './components/PersistentHardwareBar';
 import { GlanceableCockpit } from './components/GlanceableCockpit';
 import { PreShiftVerificationModal } from './components/PreShiftVerificationModal';
@@ -184,12 +182,23 @@ export default function App() {
   const [isLaptopControlRoom, setIsLaptopControlRoom] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const ua = navigator.userAgent || '';
-    const isMobileOrApk =
-      /Android|iPhone|iPad|iPod|Mobile/i.test(ua) ||
+    const platform = (navigator as any).userAgentData?.platform || navigator.platform || '';
+    const isNativeApk =
       window.location.protocol === 'capacitor:' ||
-      window.innerWidth < 768;
-    return !isMobileOrApk;
+      Boolean((window as any).Capacitor?.isNativePlatform?.());
+    if (isNativeApk || /Android|iPhone|iPod/i.test(ua)) {
+      return false; // Real Phone or Android APK -> Phone Cab Docker UI
+    }
+    if (/Win|Mac|Linux x86|CrOS/i.test(platform)) {
+      return true; // Real Windows / Mac / Linux / ChromeOS Laptop -> Control Room UI
+    }
+    return !/Mobile/i.test(ua);
   });
+
+  // Sync device mode with emergencyCallManager so Phone never shows incoming call popups and Laptop pre-warms its microphone
+  useEffect(() => {
+    emergencyCallManager.setDeviceMode(isLaptopControlRoom ? 'laptop' : 'phone');
+  }, [isLaptopControlRoom]);
 
   // Sync authenticated driver info into vehicle telemetry
   useEffect(() => {
@@ -263,7 +272,6 @@ export default function App() {
     const activeNum = emergencyCallManager.getPhoneNumber();
     cabAudio.playEmergencyAlarm();
     setCrashImpactG(impactG);
-    setIsCrashModalOpen(true);
     setTelemetry((prev) => {
       callEmergencyNumber(activeNum, {
         unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
@@ -482,7 +490,6 @@ export default function App() {
             cabAudio.playEmergencyAlarm();
             espManager.sendCommand('RELAY:0');
             setCrashImpactG(fusedG);
-            setIsCrashModalOpen(true);
             callEmergencyNumber(activeNum, {
               unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
               impactG: fusedG,
@@ -706,17 +713,6 @@ export default function App() {
       },
     };
     setEvents((prev) => [newEvt, ...prev]);
-
-    // Persist to Firestore if user is authenticated
-    if (currentUser) {
-      addDoc(collection(db, 'incidents'), {
-        ...newEvt,
-        userId: currentUser.uid,
-        cabUnitId: telemetry.cabUnitId,
-      }).catch((err) => {
-        console.warn('Incident Firestore sync:', err);
-      });
-    }
   };
 
   // Complete Pre-Shift Verification
@@ -1232,7 +1228,6 @@ export default function App() {
         cabAudio.playEmergencyAlarm();
         espManager.sendCommand('RELAY:0');
         setCrashImpactG(4.25);
-        setIsCrashModalOpen(true);
         callEmergencyNumber(activeNum, {
           unitNumber: prev.selectedVehicle?.unitNumber || prev.cabUnitId,
           impactG: 4.25,
@@ -1325,7 +1320,6 @@ export default function App() {
     espManager.sendCommand('RELAY:0');
     if ('vibrate' in navigator) navigator.vibrate([400, 150, 400, 150, 600]);
     setCrashImpactG(4.5);
-    setIsCrashModalOpen(true);
 
     setTelemetry((prev) => {
       callEmergencyNumber(activeNum, {

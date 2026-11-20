@@ -1,15 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { 
-  auth, 
-  db, 
-  signInWithGoogle, 
-  signOutUser, 
-  handleFirestoreError, 
-  OperationType,
-  testFirestoreConnection
-} from '../lib/firebase';
+import React, { createContext, useContext, useState } from 'react';
 import { cabAudio } from '../utils/audio';
 
 export interface FleetUserProfile {
@@ -24,7 +13,7 @@ export interface FleetUserProfile {
 }
 
 interface AuthContextType {
-  currentUser: User | null;
+  currentUser: any | null;
   userProfile: FleetUserProfile | null;
   isAuthReady: boolean;
   isLoading: boolean;
@@ -35,66 +24,40 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const DEFAULT_OPERATOR_PROFILE: FleetUserProfile = {
+  uid: 'operator-drivelock-active',
+  email: 'operator@fleet.drivelock',
+  displayName: 'Authorized Fleet Operator',
+  photoURL: '',
+  driverId: 'DRV-8492',
+  cabUnitId: '408',
+  role: 'driver',
+  createdAt: new Date().toISOString(),
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [userProfile, setUserProfile] = useState<FleetUserProfile | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<any | null>(null);
+  const [userProfile, setUserProfile] = useState<FleetUserProfile | null>(DEFAULT_OPERATOR_PROFILE);
+  const [isAuthReady] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-
-  useEffect(() => {
-    testFirestoreConnection().catch(() => {});
-
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setCurrentUser(user);
-      if (user) {
-        // Fetch or create Firestore user profile
-        try {
-          const userDocRef = doc(db, 'users', user.uid);
-          const snap = await getDoc(userDocRef);
-          if (snap.exists()) {
-            setUserProfile(snap.data() as FleetUserProfile);
-          } else {
-            // Create initial profile
-            const newProfile: FleetUserProfile = {
-              uid: user.uid,
-              email: user.email || 'operator@fleet.drivelock',
-              displayName: user.displayName || 'Authorized Fleet Driver',
-              photoURL: user.photoURL || '',
-              driverId: `DRV-${user.uid.slice(0, 5).toUpperCase()}`,
-              cabUnitId: '408',
-              role: 'driver',
-              createdAt: new Date().toISOString(),
-            };
-            await setDoc(userDocRef, newProfile);
-            setUserProfile(newProfile);
-          }
-        } catch (err) {
-          // Fallback local profile if offline or permission denied
-          setUserProfile({
-            uid: user.uid,
-            email: user.email || '',
-            displayName: user.displayName || 'Fleet Operator',
-            photoURL: user.photoURL || '',
-            driverId: `DRV-${user.uid.slice(0, 4).toUpperCase()}`,
-            cabUnitId: '408',
-            role: 'driver',
-            createdAt: new Date().toISOString(),
-          });
-        }
-      } else {
-        setUserProfile(null);
-      }
-      setIsAuthReady(true);
-    });
-
-    return () => unsubscribe();
-  }, []);
 
   const loginWithGoogle = async () => {
     setIsLoading(true);
     try {
       cabAudio.playKeyClick();
-      await signInWithGoogle();
+      const { signInWithGoogle } = await import('../lib/firebase');
+      const user = await signInWithGoogle();
+      setCurrentUser(user);
+      setUserProfile({
+        uid: user.uid,
+        email: user.email || 'operator@fleet.drivelock',
+        displayName: user.displayName || 'Authorized Fleet Driver',
+        photoURL: user.photoURL || '',
+        driverId: `DRV-${user.uid.slice(0, 5).toUpperCase()}`,
+        cabUnitId: '408',
+        role: 'driver',
+        createdAt: new Date().toISOString(),
+      });
       cabAudio.playSuccessChime();
     } catch (error: any) {
       console.error('Google Sign-In failed:', error);
@@ -106,26 +69,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loginDemoDriver = () => {
     cabAudio.playKeyClick();
-    const demoProfile: FleetUserProfile = {
-      uid: 'demo-driver-8492',
-      email: 'driver.demo@fleet.drivelock',
-      displayName: 'Operator DRV-8492 (Demo)',
-      photoURL: '',
-      driverId: 'DRV-8492',
-      cabUnitId: '408',
-      role: 'driver',
-      createdAt: new Date().toISOString(),
-    };
-    setUserProfile(demoProfile);
+    setUserProfile(DEFAULT_OPERATOR_PROFILE);
     cabAudio.playSuccessChime();
   };
 
   const logout = async () => {
     cabAudio.playKeyClick();
     if (currentUser) {
-      await signOutUser();
+      try {
+        const { signOutUser } = await import('../lib/firebase');
+        await signOutUser();
+      } catch (e) {}
     }
-    setUserProfile(null);
+    setUserProfile(DEFAULT_OPERATOR_PROFILE);
     setCurrentUser(null);
   };
 

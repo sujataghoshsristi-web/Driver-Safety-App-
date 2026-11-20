@@ -13,16 +13,12 @@ import {
   Truck,
   Flame,
   LogOut,
-  Settings,
-  Check,
-  X,
   Laptop
 } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import { cabAudio } from '../utils/audio';
 import { FleetUserProfile } from '../context/AuthContext';
 import {
-  DEFAULT_EMERGENCY_PHONE_NUMBER,
   callEmergencyNumber,
   emergencyCallManager,
   EmergencyCallState,
@@ -62,23 +58,13 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
   onLogout,
 }) => {
   const [callState, setCallState] = useState<EmergencyCallState>(emergencyCallManager.getState());
-  const [isConfigNumberOpen, setIsConfigNumberOpen] = useState<boolean>(false);
-  const [numberInput, setNumberInput] = useState<string>(emergencyCallManager.getPhoneNumber());
 
   useEffect(() => {
     const unsub = emergencyCallManager.subscribe((state) => {
       setCallState(state);
-      setNumberInput(state.phoneNumber);
     });
     return () => unsub();
   }, []);
-
-  const handleSaveEmergencyNumber = (e: React.FormEvent) => {
-    e.preventDefault();
-    cabAudio.playSuccessChime();
-    emergencyCallManager.setPhoneNumber(numberInput);
-    setIsConfigNumberOpen(false);
-  };
 
   const formatDuration = (sec: number) => {
     const mins = Math.floor(sec / 60).toString().padStart(2, '0');
@@ -86,12 +72,11 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
     return `${mins}:${secs}`;
   };
 
-  const activePhone = callState.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
   const isCallConnected = callState.status === 'connected';
 
   const handleInstantCallClick = () => {
     cabAudio.playKeyClick();
-    callEmergencyNumber(activePhone, {
+    callEmergencyNumber(undefined, {
       unitNumber: telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId,
       latitude: telemetry.gps.latitude,
       longitude: telemetry.gps.longitude,
@@ -105,7 +90,7 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
   return (
     <header className="relative z-30 bg-[#0d1c2d] border-b border-[#30363d] px-3 sm:px-5 pt-2.5 pb-2.5 shadow-md">
       <div className="max-w-7xl mx-auto flex flex-col gap-2.5">
-        {/* ROW 1: Brand + Instant 0ms Call Now + Configure Number */}
+        {/* ROW 1: Brand + Instant 0ms Call Now */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           {/* Left: Brand & Active Unit */}
           <div className="flex items-center gap-2">
@@ -124,7 +109,7 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
             </div>
           </div>
 
-          {/* Right: Instant 0ms Call Now Button + Configure Number Button */}
+          {/* Right: Instant Call Control Room Button */}
           <div className="flex items-center gap-2">
             {isCallConnected ? (
               <button
@@ -136,7 +121,7 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
                 className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-md transition-transform active:scale-95 select-none cursor-pointer"
               >
                 <span className="w-2 h-2 rounded-full bg-black animate-ping" />
-                <span>LIVE {activePhone} · {formatDuration(callState.durationSeconds)}</span>
+                <span>LIVE · {formatDuration(callState.durationSeconds)}</span>
               </button>
             ) : (
               <button
@@ -145,34 +130,19 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
                 className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#ef4444] hover:bg-[#dc2626] active:bg-[#b91c1c] text-white font-headline font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-md transition-transform active:scale-95 select-none cursor-pointer"
               >
                 <PhoneCall className="w-4 h-4 fill-white shrink-0" />
-                <span>Call Now ({activePhone})</span>
+                <span>Call Control Room</span>
               </button>
             )}
-
-            {/* Configure Emergency Number Button */}
-            <button
-              type="button"
-              onClick={() => {
-                cabAudio.playKeyClick();
-                setNumberInput(activePhone);
-                setIsConfigNumberOpen(!isConfigNumberOpen);
-              }}
-              className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-[#1c2b3c] hover:bg-[#273647] text-[#38bdf8] border border-[#38bdf8]/50 font-headline font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-              title="Configure Emergency Phone Number"
-            >
-              <Settings className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
-              <span>SET #</span>
-            </button>
 
             {onOpenControlRoom && (
               <button
                 type="button"
                 onClick={onOpenControlRoom}
-                className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-[#162a40] hover:bg-[#1e3854] text-[#38bdf8] border border-[#38bdf8]/50 font-headline font-bold text-xs hidden sm:flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-[#38bdf8] hover:bg-[#0284c7] text-[#051424] font-headline font-extrabold text-xs flex items-center gap-1.5 cursor-pointer shadow"
                 title="Switch to Laptop Control Room UI"
               >
-                <Laptop className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
-                <span>CONTROL ROOM UI</span>
+                <Laptop className="w-3.5 h-3.5 text-[#051424] shrink-0" />
+                <span>LAPTOP CONTROL ROOM</span>
               </button>
             )}
 
@@ -214,7 +184,7 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
           </div>
         </div>
 
-        {/* LIVE CONNECTED INSTANT SPEAKERPHONE BAR (Appears immediately at 0ms when Call Now / Crash / SOS is active) */}
+        {/* LIVE CONNECTED INSTANT SPEAKERPHONE BAR */}
         {isCallConnected && (
           <div className="p-2.5 sm:p-3 rounded-xl bg-[#062419] border-2 border-[#10b981] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-lg">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -224,7 +194,7 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono text-xs font-extrabold text-[#10b981] uppercase">
-                    INSTANT CALL CONNECTED ({activePhone}) · {formatDuration(callState.durationSeconds)}
+                    INSTANT CALL CONNECTED · {formatDuration(callState.durationSeconds)}
                   </span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/50 text-[#4edea3]">
                     SPEAKERPHONE ON · MIC {callState.isMuted ? 'MUTED' : `${Math.max(20, callState.micLevel)}%`}
@@ -257,18 +227,6 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
                 type="button"
                 onClick={() => {
                   cabAudio.playKeyClick();
-                  emergencyCallManager.reannounceDispatch();
-                }}
-                className="min-h-[36px] px-3 py-1 rounded-lg bg-[#162737] text-[#ffc174] border border-[#f59e0b]/40 font-headline font-bold text-xs flex items-center gap-1 cursor-pointer"
-              >
-                <Volume2 className="w-3.5 h-3.5 text-[#f59e0b]" />
-                <span>REPEAT</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  cabAudio.playKeyClick();
                   emergencyCallManager.endCall();
                 }}
                 className="min-h-[36px] px-3 py-1 rounded-lg bg-[#ef4444] hover:bg-[#dc2626] text-white font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer"
@@ -278,45 +236,6 @@ export const PersistentHardwareBar: React.FC<PersistentHardwareBarProps> = ({
               </button>
             </div>
           </div>
-        )}
-
-        {/* INLINE CONFIGURE EMERGENCY NUMBER PANEL (Opens when SET # is tapped) */}
-        {isConfigNumberOpen && (
-          <form
-            onSubmit={handleSaveEmergencyNumber}
-            className="p-3 rounded-xl bg-[#161b22] border-2 border-[#38bdf8] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shadow-xl"
-          >
-            <div className="flex items-center gap-2">
-              <PhoneCall className="w-4 h-4 text-[#38bdf8] shrink-0" />
-              <span className="text-xs font-headline font-bold text-white">
-                CONFIGURE EMERGENCY CALL NUMBER:
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 flex-1 max-w-md">
-              <input
-                type="tel"
-                value={numberInput}
-                onChange={(e) => setNumberInput(e.target.value)}
-                placeholder="Enter emergency number (e.g. 82199, 112, 911)"
-                className="flex-1 min-h-[40px] px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#30363d] text-white font-mono text-sm font-bold focus:outline-none focus:border-[#38bdf8]"
-              />
-              <button
-                type="submit"
-                className="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer shrink-0"
-              >
-                <Check className="w-4 h-4" />
-                <span>SAVE</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsConfigNumberOpen(false)}
-                className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-[#21262d] text-[#94a3b8] hover:text-white text-xs cursor-pointer shrink-0"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </form>
         )}
 
         {/* ROW 2: Clean 4-Button Grid on Phone (Zero Overlapping, Large Touch Targets) */}

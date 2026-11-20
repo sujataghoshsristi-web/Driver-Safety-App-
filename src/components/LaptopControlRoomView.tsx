@@ -7,9 +7,6 @@ import {
   MicOff,
   Radio,
   MapPin,
-  Settings,
-  Check,
-  X,
   Smartphone,
   Laptop,
   LogOut,
@@ -18,7 +15,6 @@ import {
 } from 'lucide-react';
 import { TelemetryData } from '../types/telemetry';
 import {
-  DEFAULT_EMERGENCY_PHONE_NUMBER,
   callEmergencyNumber,
   emergencyCallManager,
   EmergencyCallState,
@@ -45,22 +41,56 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
   onLogout,
 }) => {
   const [callState, setCallState] = useState<EmergencyCallState>(emergencyCallManager.getState());
-  const [isEditingNumber, setIsEditingNumber] = useState(false);
-  const [numberInput, setNumberInput] = useState(emergencyCallManager.getPhoneNumber());
+  const [localGps, setLocalGps] = useState<{ lat: number; lon: number; accuracy: number } | null>(
+    null
+  );
 
   useEffect(() => {
+    emergencyCallManager.setDeviceMode('laptop');
+    emergencyCallManager.prewarmMicrophone().catch(() => {});
+
     const unsub = emergencyCallManager.subscribe((state) => {
       setCallState(state);
-      setNumberInput(state.phoneNumber);
     });
-    return () => unsub();
+
+    let watchId: number | null = null;
+    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setLocalGps({
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            accuracy: pos.coords.accuracy || 10,
+          });
+        },
+        () => {},
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          setLocalGps({
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            accuracy: pos.coords.accuracy || 10,
+          });
+        },
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 2000, timeout: 8000 }
+      );
+    }
+
+    return () => {
+      unsub();
+      if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+    };
   }, []);
 
-  const activePhone = callState.phoneNumber || DEFAULT_EMERGENCY_PHONE_NUMBER;
   const isCallActive = callState.status === 'ringing' || callState.status === 'connected';
   const liveLoc = callState.remoteLocation;
-  const lat = liveLoc?.latitude || telemetry.gps.latitude || 37.7749;
-  const lon = liveLoc?.longitude || telemetry.gps.longitude || -122.4194;
+  const lat = liveLoc?.latitude || localGps?.lat || telemetry.gps.latitude || 37.7749;
+  const lon = liveLoc?.longitude || localGps?.lon || telemetry.gps.longitude || -122.4194;
   const unitId = liveLoc?.unitNumber || telemetry.selectedVehicle?.unitNumber || telemetry.cabUnitId;
   const driverId = liveLoc?.driverId || telemetry.driverId;
 
@@ -68,13 +98,6 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
     const mins = Math.floor(sec / 60).toString().padStart(2, '0');
     const secs = (sec % 60).toString().padStart(2, '0');
     return `${mins}:${secs}`;
-  };
-
-  const handleSaveNumber = (e: React.FormEvent) => {
-    e.preventDefault();
-    cabAudio.playSuccessChime();
-    emergencyCallManager.setPhoneNumber(numberInput);
-    setIsEditingNumber(false);
   };
 
   return (
@@ -92,7 +115,7 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
                   DriveLock Control Room (Laptop Dispatch)
                 </h1>
                 <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#10b981]/20 text-[#10b981] border border-[#10b981] font-bold">
-                  LINE: {activePhone}
+                  DIRECT CLOUD LINK
                 </span>
               </div>
               <p className="text-xs font-mono text-[#94a3b8]">
@@ -117,20 +140,6 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
             >
               <PhoneIncoming className="w-3.5 h-3.5" />
               <span>AUTO-ANSWER: {callState.autoAnswerOnLaptop ? 'ON' : 'OFF'}</span>
-            </button>
-
-            {/* Set Emergency Line Number */}
-            <button
-              type="button"
-              onClick={() => {
-                cabAudio.playKeyClick();
-                setNumberInput(activePhone);
-                setIsEditingNumber(!isEditingNumber);
-              }}
-              className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#1c2b3c] hover:bg-[#273647] text-[#38bdf8] border border-[#38bdf8]/50 font-headline font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-            >
-              <Settings className="w-3.5 h-3.5" />
-              <span>SET LINE # ({activePhone})</span>
             </button>
 
             {/* Audio Mute */}
@@ -168,42 +177,6 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
             )}
           </div>
         </div>
-
-        {/* Inline Emergency Number Configurator */}
-        {isEditingNumber && (
-          <form
-            onSubmit={handleSaveNumber}
-            className="max-w-7xl mx-auto mt-3 p-3 rounded-xl bg-[#161b22] border-2 border-[#38bdf8] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2"
-          >
-            <span className="text-xs font-headline font-bold text-white flex items-center gap-1.5">
-              <Settings className="w-4 h-4 text-[#38bdf8]" />
-              <span>SET CONTROL ROOM EMERGENCY LINE NUMBER (MUST MATCH PHONE):</span>
-            </span>
-            <div className="flex items-center gap-2 flex-1 max-w-md">
-              <input
-                type="tel"
-                value={numberInput}
-                onChange={(e) => setNumberInput(e.target.value)}
-                placeholder="e.g. 82199"
-                className="flex-1 min-h-[38px] px-3 py-1 rounded-lg bg-[#0d1117] border border-[#30363d] text-white font-mono text-sm font-bold"
-              />
-              <button
-                type="submit"
-                className="min-h-[38px] px-3.5 py-1 rounded-lg bg-[#10b981] text-black font-headline font-extrabold text-xs flex items-center gap-1 cursor-pointer"
-              >
-                <Check className="w-4 h-4" />
-                <span>SAVE</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsEditingNumber(false)}
-                className="min-h-[38px] px-2.5 py-1 rounded-lg bg-[#21262d] text-[#94a3b8] hover:text-white text-xs cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </form>
-        )}
       </header>
 
       {/* Main Control Room Workspace: Voice Call Console + Live Phone GPS Map */}
@@ -217,7 +190,7 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
               </div>
               <div>
                 <span className="font-mono text-xs font-extrabold bg-[#10b981] text-black px-2.5 py-0.5 rounded uppercase">
-                  INCOMING EMERGENCY CALL FROM CAB PHONE ({activePhone})
+                  INCOMING EMERGENCY CALL FROM CAB PHONE
                 </span>
                 <h2 className="font-headline font-extrabold text-xl sm:text-2xl mt-1">
                   {callState.incomingCallerInfo || `Cab Unit ${unitId} Calling Control Room`}
@@ -232,7 +205,7 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
               type="button"
               onClick={() => {
                 cabAudio.playSuccessChime();
-                emergencyCallManager.answerIncomingCall(activePhone);
+                emergencyCallManager.answerIncomingCall();
               }}
               className="w-full sm:w-auto min-h-[56px] px-7 py-3 rounded-xl bg-[#10b981] hover:bg-[#34d399] text-black font-headline font-extrabold text-base flex items-center justify-center gap-2.5 shadow-2xl cursor-pointer animate-pulse"
             >
@@ -275,8 +248,8 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
                     {callState.peerConnected
                       ? `LIVE TWO-WAY VOICE CONNECTED · ${formatDuration(callState.durationSeconds)}`
                       : isCallActive
-                      ? `CONNECTING TO CAB PHONE (${activePhone})...`
-                      : `CONTROL ROOM STANDBY · LISTENING ON LINE ${activePhone}`}
+                      ? 'CONNECTING TO CAB PHONE...'
+                      : 'CONTROL ROOM STANDBY · LISTENING FOR CAB CALLS'}
                   </span>
                   <span className="font-mono text-xs text-[#94a3b8]">
                     UNIT: <strong className="text-white">{unitId}</strong> · DRIVER:{' '}
@@ -285,10 +258,10 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
                 </div>
                 <h2 className="font-headline font-bold text-lg sm:text-xl text-white mt-1">
                   {callState.peerConnected
-                    ? `Speaking Live with Cab Phone (${activePhone})`
+                    ? 'Speaking Live with Cab Phone over Internet'
                     : isCallActive
-                    ? `Ringing Cab Phone (${activePhone}) over Internet Server...`
-                    : `Ready to Receive Emergency Call from Cab Phone (4 Knocks / Crash / SOS)`}
+                    ? 'Ringing Cab Phone over Internet Server...'
+                    : 'Ready to Receive Emergency Call from Cab Phone (4 Knocks / Crash / SOS)'}
                 </h2>
               </div>
             </div>
@@ -300,19 +273,19 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
                     type="button"
                     onClick={() => {
                       cabAudio.playSuccessChime();
-                      emergencyCallManager.answerIncomingCall(activePhone);
+                      emergencyCallManager.answerIncomingCall();
                     }}
                     className="flex-1 sm:flex-none min-h-[46px] px-4 py-2 rounded-xl bg-[#10b981] hover:bg-[#059669] text-black font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer shadow-lg"
                   >
                     <PhoneIncoming className="w-4 h-4" />
-                    <span>ANSWER INCOMING ({activePhone})</span>
+                    <span>ANSWER INCOMING CALL</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => {
                       cabAudio.playKeyClick();
-                      callEmergencyNumber(activePhone, {
+                      callEmergencyNumber(undefined, {
                         unitNumber: unitId,
                         driverId,
                         latitude: lat,
@@ -323,7 +296,7 @@ export const LaptopControlRoomView: React.FC<LaptopControlRoomViewProps> = ({
                     className="flex-1 sm:flex-none min-h-[46px] px-4 py-2 rounded-xl bg-[#38bdf8] hover:bg-[#0284c7] text-[#051424] font-headline font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer shadow-lg"
                   >
                     <PhoneCall className="w-4 h-4" />
-                    <span>CALL CAB PHONE ({activePhone})</span>
+                    <span>CALL CAB PHONE</span>
                   </button>
                 </>
               ) : (
